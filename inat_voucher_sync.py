@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-inat_voucher_gui.py
+inat_voucher_sync.py
 
 Self-contained desktop GUI for syncing QR-decoded voucher IDs to iNaturalist
 observation fields.  All backend logic is embedded — no other project files
@@ -17,7 +17,7 @@ Optional OCR fallback (reads the printed voucher ID when the QR code fails):
   # Debian:  sudo apt-get install tesseract-ocr
 
 Run:
-  python inat_voucher_gui.py
+  python inat_voucher_sync.py
 """
 
 import csv
