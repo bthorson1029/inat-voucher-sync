@@ -136,7 +136,7 @@ text from a photo with no label is unlikely to be mistaken for a voucher.
 
 | Option | Pattern | Matches |
 |--------|---------|---------|
-| **Prefix-Number** (default) | `\b[A-Za-z0-9]{2,4}-\d{3,5}\b` | 2–4 alphanumeric chars + hyphen + 3–5 digits — `BT-001`, `ABC-1234`, `AB12-34567` |
+| **Prefix-Number** (default) | `\b(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,4}-\d{3,5}\b` | 2–4 alphanumeric chars (≥1 letter) + hyphen + 3–5 digits — `BT-001`, `ABC-1234`, `AB12-34567` |
 | **Numbers only** | `\b\d{3,6}\b` | 3–6 digits — `00421`, `123456` |
 | **Alphanumeric** | `\b…[A-Za-z0-9]{4,10}\b` | 4–10 chars with at least one letter *and* one digit — `AB12`, `A1B2C3` |
 | **Custom** | *(your regex)* | Whatever you enter; the box unlocks when selected |

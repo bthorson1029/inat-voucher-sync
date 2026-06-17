@@ -76,11 +76,14 @@ DEFAULT_USER       = ""
 DEFAULT_FIELD_NAME = "Personal voucher number"
 DEFAULT_FIELD_ID   = 1907
 # Regex matching your label/voucher format. Matching is case-insensitive.
-# The default accepts a 2–4 character alphanumeric prefix, a hyphen, and a
-# 3–5 digit numeric suffix, e.g. "BT-001", "ABC-1234", "AB12-34567". The
-# required hyphen, bounded lengths, and word boundaries keep OCR noise from
-# being mistaken for a voucher; widen or narrow it to match your own scheme.
-DEFAULT_VOUCHER_RE = r"\b[A-Za-z0-9]{2,4}-\d{3,5}\b"
+# The default accepts a 2–4 character alphanumeric prefix that must contain at
+# least one letter, a hyphen, and a 3–5 digit numeric suffix, e.g. "BT-001",
+# "ABC-1234", "AB12-34567". The leading (?=...) lookahead enforces the "at
+# least one letter" rule, so a purely numeric prefix like "12-3456" (likely
+# OCR noise or a date) is not mistaken for a voucher. The required hyphen,
+# bounded lengths, and word boundaries further constrain matches; widen or
+# narrow it to match your own scheme.
+DEFAULT_VOUCHER_RE = r"\b(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,4}-\d{3,5}\b"
 REQUEST_PAUSE      = 0.8
 PER_PAGE           = 200
 # Photos are fetched from iNaturalist's CDN/S3, not the rate-limited write API,
