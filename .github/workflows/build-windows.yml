@@ -1,10 +1,18 @@
 name: Build Windows executable
 
 # Build the standalone VoucherSync.exe on a clean Windows runner.
+# - On a pull request that touches the build (so we confirm it builds BEFORE
+#   merging): builds + uploads the exe as a downloadable artifact.
 # - Push a tag like v1.0.0 to build AND attach the exe to that GitHub Release.
-# - Or run manually from the Actions tab (workflow_dispatch) to get the exe
-#   as a downloadable build artifact without cutting a release.
+# - Or run manually any time from the Actions tab (workflow_dispatch).
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "inat_voucher_sync.py"
+      - "inat_voucher_sync.spec"
+      - "requirements.txt"
+      - ".github/workflows/build-windows.yml"
   push:
     tags: ["v*"]
   workflow_dispatch:
