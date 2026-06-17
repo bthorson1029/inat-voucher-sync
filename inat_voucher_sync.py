@@ -905,6 +905,21 @@ class VoucherSyncApp(tk.Tk):
             self._tree.column(col, width=widths[col], minwidth=50,
                               stretch=(col == "taxon"))
 
+        # Tk 8.6.9 regression: the Treeview style map contains a
+        # ('!disabled', '!selected', ...) entry that forces every normal row
+        # to the default background, overriding per-row tag colours. Strip it
+        # so tag_configure backgrounds render. Fixed upstream in Tk 8.6.10;
+        # this filter is harmless on versions that don't have the bad entry.
+        style = ttk.Style()
+
+        def _fixed_map(option):
+            return [e for e in style.map("Treeview", query_opt=option)
+                    if e[:2] != ("!disabled", "!selected")]
+
+        style.map("Treeview",
+                  foreground=_fixed_map("foreground"),
+                  background=_fixed_map("background"))
+
         for tag, bg in ROW_COLOR.items():
             self._tree.tag_configure(tag, background=bg)
 
