@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import datetime
 import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, messagebox
+from tkinter import ttk, scrolledtext, filedialog, messagebox, simpledialog
 from tkinter import font as tkfont
 
 # ---------------------------------------------------------------------------
@@ -188,6 +188,23 @@ class INatClient:
         r = self.session.get(url, timeout=60)
         r.raise_for_status()
         return r.content
+
+    def search_observation_fields(self, query):
+        """Search iNaturalist observation fields by name.  Returns a list of
+        {"id", "name", "datatype"} dicts.  No auth required."""
+        r = self.session.get(
+            f"{WEB}/observation_fields.json",
+            params={"q": query}, timeout=30,
+        )
+        r.raise_for_status()
+        fields = []
+        for f in r.json() or []:
+            fid = f.get("id")
+            name = f.get("name")
+            if fid and name:
+                fields.append({"id": fid, "name": name,
+                               "datatype": f.get("datatype", "")})
+        return fields
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +690,8 @@ COL = {
     "green_text":   "#16774a",
     "green_bg":     "#e6f5ec",
     "green_border": "#c3e8d4",
+    "danger":       "#e0584a",   # Stop button
+    "danger_press": "#c94436",
     "skip_bg":      "#eaeef3",
     "skip_fg":      "#5b6573",
     "flag_bg":      "#fdebcf",
@@ -721,38 +740,44 @@ def _init_fonts(root):
 # Custom widgets  —  Tkinter has no native toggle / segmented control, so the
 # design's pieces are drawn by hand.
 # ---------------------------------------------------------------------------
-class ToggleSwitch(tk.Canvas):
-    """A pill toggle bound to a BooleanVar: blue when on, gray when off."""
+class Switch(tk.Frame):
+    """A crisp Off/On toggle bound to a BooleanVar.
 
-    def __init__(self, parent, variable, command=None, bg=None):
-        super().__init__(parent, width=40, height=24,
-                         bg=bg or parent["bg"], highlightthickness=0, bd=0,
-                         cursor="hand2")
+    Rendered as a two-segment pill rather than a canvas-drawn knob — Tkinter's
+    canvas has no anti-aliasing, so a rounded knob comes out jagged. This reads
+    as a toggle while staying pixel-clean and consistent with SegmentedControl.
+    """
+
+    def __init__(self, parent, variable, command=None, accent=None):
+        super().__init__(parent, bg=COL["track"], highlightthickness=1,
+                         highlightbackground=COL["card_border"], bd=0)
         self._var = variable
         self._cmd = command
-        self.bind("<Button-1>", self._toggle)
-        self._draw()
+        self._accent = accent or COL["primary"]
+        self._off = tk.Label(self, text="Off", padx=12, pady=5,
+                             cursor="hand2")
+        self._off.pack(side="left", padx=2, pady=2)
+        self._on = tk.Label(self, text="On", padx=12, pady=5, cursor="hand2")
+        self._on.pack(side="left", padx=2, pady=2)
+        self._off.bind("<Button-1>", lambda _e: self._set(False))
+        self._on.bind("<Button-1>", lambda _e: self._set(True))
+        self.refresh()
 
-    def _toggle(self, _evt=None):
-        self._var.set(not bool(self._var.get()))
-        self._draw()
+    def _set(self, value):
+        self._var.set(value)
+        self.refresh()
         if self._cmd:
             self._cmd()
 
     def refresh(self):
-        self._draw()
-
-    def _draw(self):
-        self.delete("all")
-        on  = bool(self._var.get())
-        col = COL["primary"] if on else COL["toggle_off"]
-        # rounded track (two end caps + center rect)
-        self.create_oval(1, 2, 21, 22, fill=col, outline="")
-        self.create_oval(19, 2, 39, 22, fill=col, outline="")
-        self.create_rectangle(11, 2, 29, 22, fill=col, outline="")
-        # knob
-        cx = 29 if on else 11
-        self.create_oval(cx - 9, 3, cx + 9, 21, fill="#ffffff", outline="")
+        if bool(self._var.get()):
+            self._on.configure(bg=self._accent, fg="#ffffff", font=F["seg_sel"])
+            self._off.configure(bg=COL["track"], fg=COL["text_soft2"],
+                                font=F["seg"])
+        else:
+            self._off.configure(bg="#ffffff", fg=COL["text"], font=F["seg_sel"])
+            self._on.configure(bg=COL["track"], fg=COL["text_soft2"],
+                               font=F["seg"])
 
 
 class SegmentedControl(tk.Frame):
@@ -850,6 +875,7 @@ class VoucherSyncApp(tk.Tk):
         self._rows   = []
         self._mq     = queue.Queue()
         self._worker = None
+        self._cancel = threading.Event()
         self._log_open = False
 
         self._build_ui()
@@ -1049,24 +1075,33 @@ class VoucherSyncApp(tk.Tk):
                             self._load_token_file, padx=13).pack(
             side="left", padx=(8, 0))
 
-        # Username + Field ID
-        uf = tk.Frame(c, bg=bg)
-        uf.pack(fill="x", pady=(14, 0))
-        uf.columnconfigure(0, weight=1)
-        ucol = tk.Frame(uf, bg=bg)
-        ucol.grid(row=0, column=0, sticky="ew")
-        self._field_label(ucol, "Username", bg)
+        # Username
+        self._field_label(c, "Username", bg, pady=(14, 5))
         self._user_var = tk.StringVar(value=DEFAULT_USER)
-        self._entry(ucol, self._user_var).pack(fill="x", ipady=5)
+        self._entry(c, self._user_var).pack(fill="x", ipady=5)
 
-        fcol = tk.Frame(uf, bg=bg)
-        fcol.grid(row=0, column=1, sticky="ew", padx=(12, 0))
-        self._field_label(fcol, "Field ID", bg)
+        # Observation field — a searchable picker rather than a raw numeric ID.
+        # The field that stores the voucher; `_field_id_var` keeps the numeric
+        # id the rest of the app uses, while the combobox shows a friendly name.
+        self._field_label(c, "Observation field", bg, pady=(14, 5))
         self._field_id_var = tk.StringVar(value=str(DEFAULT_FIELD_ID))
-        self._entry(fcol, self._field_id_var, mono=True, width=8).pack(
-            fill="x", ipady=5)
+        frow = tk.Frame(c, bg=bg)
+        frow.pack(fill="x")
+        self._field_combo_var = tk.StringVar(
+            value=f"{DEFAULT_FIELD_NAME} (#{DEFAULT_FIELD_ID})")
+        # "Name (#id)" -> id, seeded with the default so it's selectable.
+        self._field_choices = {self._field_combo_var.get(): DEFAULT_FIELD_ID}
+        self._field_combo = ttk.Combobox(
+            frow, textvariable=self._field_combo_var, font=F["body"],
+            state="readonly")
+        self._field_combo["values"] = (self._field_combo_var.get(),)
+        self._field_combo.bind("<<ComboboxSelected>>", self._on_field_selected)
+        self._field_combo.pack(side="left", fill="x", expand=True, ipady=3)
+        self._field_search_btn = self._secondary_btn(
+            frow, "Search…", self._search_fields, padx=13)
+        self._field_search_btn.pack(side="left", padx=(8, 0))
 
-        tk.Label(c, text="Observation field that stores the voucher code.",
+        tk.Label(c, text="The observation field that stores the voucher code.",
                  bg=bg, fg=COL["muted"], font=F["help"]).pack(
             anchor="w", pady=(7, 0))
 
@@ -1137,7 +1172,7 @@ class VoucherSyncApp(tk.Tk):
                 if self._overwrite_var.get()
                 else "Off — only fills blank fields.")
 
-        ToggleSwitch(ow, self._overwrite_var, command=_ow_cmd, bg=bg).pack(
+        Switch(ow, self._overwrite_var, command=_ow_cmd).pack(
             side="left", padx=(0, 11))
         ow_text.pack(side="left")
         tk.Label(ow_text, text="Overwrite existing values", bg=bg,
@@ -1152,8 +1187,8 @@ class VoucherSyncApp(tk.Tk):
         left = tk.Frame(row, bg=bg)
         left.pack(side="left")
         self._ocr_var = tk.BooleanVar(value=False)
-        self._ocr_toggle = ToggleSwitch(left, self._ocr_var,
-                                        command=self._toggle_ocr, bg=bg)
+        self._ocr_toggle = Switch(left, self._ocr_var,
+                                  command=self._toggle_ocr)
         self._ocr_toggle.pack(side="left", padx=(0, 11))
         ltxt = tk.Frame(left, bg=bg)
         ltxt.pack(side="left")
@@ -1219,6 +1254,59 @@ class VoucherSyncApp(tk.Tk):
         )
         if path:
             self._tess_var.set(path)
+
+    # ----- observation-field lookup ---------------------------------------- #
+    def _search_fields(self):
+        query = simpledialog.askstring(
+            "Find observation field",
+            "Search iNaturalist observation fields by name:",
+            parent=self)
+        if not query or len(query.strip()) < 2:
+            return
+        query = query.strip()
+        self._field_search_btn.set_enabled(False)
+        self._log_write(f"Searching observation fields for “{query}”…")
+        threading.Thread(target=self._field_search_worker,
+                         args=(query,), daemon=True).start()
+
+    def _field_search_worker(self, query):
+        try:
+            fields = INatClient().search_observation_fields(query)
+            self._mq.put({"kind": "field_results",
+                          "query": query, "fields": fields})
+        except Exception as exc:
+            self._mq.put({"kind": "field_results",
+                          "query": query, "error": str(exc)})
+
+    def _on_field_results(self, msg):
+        self._field_search_btn.set_enabled(True)
+        if msg.get("error"):
+            messagebox.showerror("Field search failed", msg["error"])
+            return
+        fields = msg["fields"]
+        if not fields:
+            messagebox.showinfo(
+                "No matches",
+                f"No observation fields matched “{msg['query']}”.")
+            return
+        self._field_choices = {}
+        values = []
+        for f in fields:
+            dt = f" · {f['datatype']}" if f.get("datatype") else ""
+            label = f"{f['name']} (#{f['id']}){dt}"
+            self._field_choices[label] = f["id"]
+            values.append(label)
+        self._field_combo["values"] = values
+        self._field_combo_var.set(values[0])
+        self._field_id_var.set(str(self._field_choices[values[0]]))
+        self._log_write(
+            f"Found {len(fields)} field(s) — selected “{values[0]}”. "
+            "Open the dropdown to pick another.")
+
+    def _on_field_selected(self, _evt=None):
+        fid = self._field_choices.get(self._field_combo_var.get())
+        if fid is not None:
+            self._field_id_var.set(str(fid))
 
     # ----- action bar ------------------------------------------------------ #
     def _build_action_bar(self, parent):
@@ -1558,12 +1646,38 @@ class VoucherSyncApp(tk.Tk):
             webbrowser.open(f"{WEB}/observations/{sel}")
 
     def _set_busy(self, busy):
-        self._btn_preview.set_enabled(not busy)
         if busy:
             self._btn_apply.set_enabled(False)
         else:
             n_update = sum(1 for r in self._rows if r["action"] == UPDATE)
             self._btn_apply.set_enabled(bool(n_update))
+
+    def _set_preview_mode(self, mode):
+        """Toggle the primary button between Preview run, Stop, and Stopping."""
+        btn = self._btn_preview
+        if mode == "stop":
+            btn._enabled_palette = ("#ffffff", COL["danger"],
+                                    COL["danger_press"])
+            btn.configure(state="normal", text="Stop",
+                          command=self._stop_preview, fg="#ffffff",
+                          bg=COL["danger"], activebackground=COL["danger_press"],
+                          cursor="hand2")
+        elif mode == "stopping":
+            btn.configure(state="disabled", text="Stopping…",
+                          bg=COL["muted2"], disabledforeground="#ffffff",
+                          cursor="arrow")
+        else:  # "preview"
+            btn._enabled_palette = ("#ffffff", COL["primary"],
+                                    COL["primary_press"])
+            btn.configure(state="normal", text="Preview run",
+                          command=self._start_preview, fg="#ffffff",
+                          bg=COL["primary"], activebackground=COL["primary_press"],
+                          cursor="hand2")
+
+    def _stop_preview(self):
+        self._cancel.set()
+        self._set_preview_mode("stopping")
+        self._status_lbl.configure(text="Stopping…", fg=COL["text_med"])
 
     def _update_summary(self):
         counts = {UPDATE: 0, SKIP: 0, FLAG: 0}
@@ -1588,6 +1702,8 @@ class VoucherSyncApp(tk.Tk):
                     self._log_write(msg["text"])
                 elif kind == "connected":
                     self._set_connected(msg["login"])
+                elif kind == "field_results":
+                    self._on_field_results(msg)
                 elif kind == "progress":
                     self._prog_bar.configure(
                         mode="determinate",
@@ -1614,12 +1730,14 @@ class VoucherSyncApp(tk.Tk):
                 elif kind == "row_refresh":
                     self._tree_refresh_row(msg["row"])
                 elif kind == "preview_done":
-                    self._on_preview_done(msg["rows"])
+                    self._on_preview_done(msg["rows"],
+                                          msg.get("cancelled", False))
                 elif kind == "apply_done":
                     self._on_apply_done(msg["applied"], msg["failed"])
                 elif kind == "error":
                     messagebox.showerror("Error", msg["text"])
                     self._set_busy(False)
+                    self._set_preview_mode("preview")
                     self._prog_bar.stop()
                     self._prog_bar.configure(
                         mode="determinate", maximum=100, value=0)
@@ -1636,7 +1754,9 @@ class VoucherSyncApp(tk.Tk):
         if not self._validate():
             return
         self._clear()
+        self._cancel.clear()
         self._set_busy(True)
+        self._set_preview_mode("stop")
 
         token        = self._token_var.get().strip()
         user         = self._user_var.get().strip()
@@ -1682,6 +1802,11 @@ class VoucherSyncApp(tk.Tk):
             total = len(obs_list)
             q.put({"kind": "spin_stop"})
 
+            if self._cancel.is_set():
+                q.put({"kind": "log", "text": "Preview stopped before scanning."})
+                q.put({"kind": "preview_done", "rows": [], "cancelled": True})
+                return
+
             if not total:
                 q.put({"kind": "log", "text": "No matching observations found."})
                 q.put({"kind": "preview_done", "rows": []})
@@ -1696,15 +1821,25 @@ class VoucherSyncApp(tk.Tk):
             # rate-limited write API.  Results are stored by original index so
             # `rows` stays in observation order even though they finish out of
             # order; the decode itself is unchanged, so detection is identical.
+            #
+            # Cancellation: when the user hits Stop we break out of the
+            # completion loop, cancel any not-yet-started futures, and return
+            # whatever finished.  In-flight decodes run to completion (one per
+            # worker) but their results are simply ignored.
             rows = [None] * total
             done = 0
-            with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
-                future_to_idx = {
-                    pool.submit(build_row, client, obs, field_id, voucher_re,
-                                allow_overwrite, use_ocr, tess_cmd): idx
-                    for idx, obs in enumerate(obs_list)
-                }
+            cancelled = False
+            pool = ThreadPoolExecutor(max_workers=SCAN_WORKERS)
+            future_to_idx = {
+                pool.submit(build_row, client, obs, field_id, voucher_re,
+                            allow_overwrite, use_ocr, tess_cmd): idx
+                for idx, obs in enumerate(obs_list)
+            }
+            try:
                 for fut in as_completed(future_to_idx):
+                    if self._cancel.is_set():
+                        cancelled = True
+                        break
                     idx = future_to_idx[fut]
                     obs = obs_list[idx]
                     try:
@@ -1735,13 +1870,21 @@ class VoucherSyncApp(tk.Tk):
                                if row["detected_voucher"] else "")
                         ),
                     })
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
 
-            q.put({"kind": "preview_done", "rows": rows})
+            if cancelled:
+                q.put({"kind": "log",
+                       "text": f"\nPreview stopped — {done} of {total} "
+                               "observation(s) scanned."})
+            scanned = [r for r in rows if r is not None]
+            q.put({"kind": "preview_done", "rows": scanned,
+                   "cancelled": cancelled})
 
         except Exception as exc:
             q.put({"kind": "error", "text": str(exc)})
 
-    def _on_preview_done(self, rows):
+    def _on_preview_done(self, rows, cancelled=False):
         self._rows = rows
         self._update_summary()
         counts = {UPDATE: 0, SKIP: 0, FLAG: 0}
@@ -1751,19 +1894,25 @@ class VoucherSyncApp(tk.Tk):
             if r["action"] == UPDATE and "ocr" in r.get("reason", ""):
                 ocr_count += 1
         ocr_note = f" ({ocr_count} via OCR)" if ocr_count else ""
+        verb = "Preview stopped" if cancelled else "Preview complete"
         self._log_write(
-            f"\nPreview complete — "
+            f"\n{verb} — "
             f"{counts[UPDATE]} update{ocr_note}, "
             f"{counts[SKIP]} skip, "
             f"{counts[FLAG]} flag."
         )
         n = len(rows)
-        self._status_lbl.configure(text="✓ Preview complete",
-                                   fg=COL["green_text"])
-        self._prog_bar.configure(mode="determinate", maximum=max(n, 1),
-                                 value=n)
-        self._count_lbl.configure(
-            text=f"{n} of {n} observations scanned")
+        if cancelled:
+            self._status_lbl.configure(text="Preview stopped",
+                                       fg=COL["text_med"])
+            self._count_lbl.configure(text=f"{n} scanned before stop")
+        else:
+            self._status_lbl.configure(text="✓ Preview complete",
+                                       fg=COL["green_text"])
+            self._prog_bar.configure(mode="determinate", maximum=max(n, 1),
+                                     value=n)
+            self._count_lbl.configure(text=f"{n} of {n} observations scanned")
+        self._set_preview_mode("preview")
         self._set_busy(False)
 
     # ----------------------------------------------------------------------- #
@@ -1789,6 +1938,7 @@ class VoucherSyncApp(tk.Tk):
             return
 
         self._set_busy(True)
+        self._btn_preview.set_enabled(False)   # no preview while applying
         self._log_write("\nApplying updates...")
 
         token    = self._token_var.get().strip()
@@ -1843,6 +1993,7 @@ class VoucherSyncApp(tk.Tk):
             f"\nApply complete — {applied} written, {failed} failed.")
         self._update_summary()
         self._set_busy(False)
+        self._set_preview_mode("preview")
 
     # ----------------------------------------------------------------------- #
     # Export                                                                   #
