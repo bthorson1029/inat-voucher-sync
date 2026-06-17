@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import datetime
 import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, messagebox, simpledialog
+from tkinter import ttk, scrolledtext, filedialog, messagebox
 from tkinter import font as tkfont
 
 # ---------------------------------------------------------------------------
@@ -840,6 +840,143 @@ class FlatButton(tk.Button):
                            cursor="arrow")
 
 
+class AutocompleteEntry(tk.Frame):
+    """An entry with a live suggestion dropdown.
+
+    Typing (debounced) calls `on_query(text)`; the owner runs the lookup off
+    the UI thread and feeds matches back via `show_results(query, items)`,
+    where `items` is a list of (label, value). Picking one fills the entry
+    with the label and calls `on_select(value, label)`.
+    """
+
+    def __init__(self, parent, textvariable, on_query, on_select,
+                 min_chars=2, delay=280):
+        super().__init__(parent, bg=COL["card_bg"])
+        self._var = textvariable
+        self._on_query = on_query
+        self._on_select = on_select
+        self._min = min_chars
+        self._delay = delay
+        self._after = None
+        self._popup = None
+        self._listbox = None
+        self._items = []
+
+        self._entry = tk.Entry(
+            self, textvariable=self._var, bd=0, relief="flat",
+            highlightthickness=1, highlightbackground=COL["card_border"],
+            highlightcolor=COL["primary"], bg=COL["card_bg"], fg=COL["text"],
+            insertbackground=COL["text"], font=F["body"])
+        self._entry.pack(fill="x", ipady=5)
+        self._entry.bind("<KeyRelease>", self._on_key)
+        self._entry.bind("<Down>", self._focus_list)
+        self._entry.bind("<Return>", self._on_return)
+        self._entry.bind("<Escape>", lambda _e: self._hide())
+        self._entry.bind("<FocusOut>", self._on_focus_out)
+
+    # typing → debounced query
+    def _on_key(self, evt):
+        if evt.keysym in ("Up", "Down", "Return", "Escape", "Tab",
+                          "Left", "Right", "Shift_L", "Shift_R"):
+            return
+        if self._after:
+            self.after_cancel(self._after)
+        self._after = self.after(self._delay, self._fire)
+
+    def _fire(self):
+        self._after = None
+        text = self._var.get().strip()
+        if len(text) < self._min:
+            self._hide()
+            return
+        self._on_query(text)
+
+    # owner feeds results back here (on the UI thread)
+    def show_results(self, query, items):
+        if query.strip() != self._var.get().strip():
+            return  # stale: the user kept typing
+        self._items = items
+        if not items:
+            self._hide()
+            return
+        self._ensure_popup()
+        self._listbox.delete(0, "end")
+        for label, _val in items:
+            self._listbox.insert("end", label)
+        self._position_popup(len(items))
+
+    def _ensure_popup(self):
+        if self._popup:
+            return
+        self._popup = tk.Toplevel(self)
+        self._popup.wm_overrideredirect(True)
+        self._listbox = tk.Listbox(
+            self._popup, activestyle="none", bd=0, highlightthickness=1,
+            highlightbackground=COL["card_border"], bg=COL["card_bg"],
+            fg=COL["text"], font=F["body"], selectbackground="#dbe7ff",
+            selectforeground=COL["text"], exportselection=False)
+        self._listbox.pack(fill="both", expand=True)
+        self._listbox.bind("<ButtonRelease-1>", self._choose)
+        self._listbox.bind("<Return>", self._choose)
+        self._listbox.bind("<Escape>",
+                           lambda _e: (self._hide(), self._entry.focus_set()))
+
+    def _position_popup(self, n):
+        self._listbox.configure(height=min(n, 8))
+        self._popup.update_idletasks()
+        x = self._entry.winfo_rootx()
+        y = self._entry.winfo_rooty() + self._entry.winfo_height() + 2
+        w = self._entry.winfo_width()
+        h = self._listbox.winfo_reqheight()
+        self._popup.wm_geometry(f"{w}x{h}+{x}+{y}")
+        self._popup.lift()
+
+    def _focus_list(self, _evt):
+        if self._popup and self._listbox.size():
+            self._listbox.focus_set()
+            self._listbox.selection_clear(0, "end")
+            self._listbox.selection_set(0)
+            self._listbox.activate(0)
+            return "break"
+
+    def _on_return(self, _evt):
+        if self._popup and self._items:
+            sel = self._listbox.curselection()
+            self._pick(sel[0] if sel else 0)
+            return "break"
+
+    def _choose(self, _evt=None):
+        if self._listbox:
+            sel = self._listbox.curselection()
+            if sel:
+                self._pick(sel[0])
+
+    def _pick(self, idx):
+        label, value = self._items[idx]
+        self._var.set(label)
+        self._hide()
+        self._entry.focus_set()
+        self._entry.icursor("end")
+        self._on_select(value, label)
+
+    def _on_focus_out(self, _evt):
+        # Defer so a click landing on the listbox is processed first.
+        self.after(150, self._maybe_hide)
+
+    def _maybe_hide(self):
+        if self.focus_get() is not self._listbox:
+            self._hide()
+
+    def _hide(self):
+        if self._after:
+            self.after_cancel(self._after)
+            self._after = None
+        if self._popup:
+            self._popup.destroy()
+            self._popup = None
+            self._listbox = None
+
+
 # ---------------------------------------------------------------------------
 # GUI — preview-queue row colours (zebra rows, amber flags, tinted updates)
 # ---------------------------------------------------------------------------
@@ -1080,28 +1217,21 @@ class VoucherSyncApp(tk.Tk):
         self._user_var = tk.StringVar(value=DEFAULT_USER)
         self._entry(c, self._user_var).pack(fill="x", ipady=5)
 
-        # Observation field — a searchable picker rather than a raw numeric ID.
-        # The field that stores the voucher; `_field_id_var` keeps the numeric
-        # id the rest of the app uses, while the combobox shows a friendly name.
+        # Observation field — a predictive picker rather than a raw numeric ID.
+        # Type to search iNaturalist's fields live; `_field_id_var` keeps the
+        # numeric id the rest of the app uses, while the box shows a friendly
+        # name. Seeded with the default field.
         self._field_label(c, "Observation field", bg, pady=(14, 5))
         self._field_id_var = tk.StringVar(value=str(DEFAULT_FIELD_ID))
-        frow = tk.Frame(c, bg=bg)
-        frow.pack(fill="x")
-        self._field_combo_var = tk.StringVar(
+        self._field_name_var = tk.StringVar(
             value=f"{DEFAULT_FIELD_NAME} (#{DEFAULT_FIELD_ID})")
-        # "Name (#id)" -> id, seeded with the default so it's selectable.
-        self._field_choices = {self._field_combo_var.get(): DEFAULT_FIELD_ID}
-        self._field_combo = ttk.Combobox(
-            frow, textvariable=self._field_combo_var, font=F["body"],
-            state="readonly")
-        self._field_combo["values"] = (self._field_combo_var.get(),)
-        self._field_combo.bind("<<ComboboxSelected>>", self._on_field_selected)
-        self._field_combo.pack(side="left", fill="x", expand=True, ipady=3)
-        self._field_search_btn = self._secondary_btn(
-            frow, "Search…", self._search_fields, padx=13)
-        self._field_search_btn.pack(side="left", padx=(8, 0))
+        self._field_widget = AutocompleteEntry(
+            c, self._field_name_var,
+            on_query=self._field_query, on_select=self._field_chosen)
+        self._field_widget.pack(fill="x")
 
-        tk.Label(c, text="The observation field that stores the voucher code.",
+        tk.Label(c, text="Start typing to search the fields that store "
+                         "voucher codes.",
                  bg=bg, fg=COL["muted"], font=F["help"]).pack(
             anchor="w", pady=(7, 0))
 
@@ -1255,17 +1385,9 @@ class VoucherSyncApp(tk.Tk):
         if path:
             self._tess_var.set(path)
 
-    # ----- observation-field lookup ---------------------------------------- #
-    def _search_fields(self):
-        query = simpledialog.askstring(
-            "Find observation field",
-            "Search iNaturalist observation fields by name:",
-            parent=self)
-        if not query or len(query.strip()) < 2:
-            return
-        query = query.strip()
-        self._field_search_btn.set_enabled(False)
-        self._log_write(f"Searching observation fields for “{query}”…")
+    # ----- predictive observation-field lookup ----------------------------- #
+    def _field_query(self, query):
+        """Fired (debounced) by the autocomplete entry as the user types."""
         threading.Thread(target=self._field_search_worker,
                          args=(query,), daemon=True).start()
 
@@ -1275,38 +1397,23 @@ class VoucherSyncApp(tk.Tk):
             self._mq.put({"kind": "field_results",
                           "query": query, "fields": fields})
         except Exception as exc:
+            # Stay quiet on transient lookup errors (one per keystroke burst);
+            # just note it in the run log rather than popping a dialog.
             self._mq.put({"kind": "field_results",
                           "query": query, "error": str(exc)})
 
     def _on_field_results(self, msg):
-        self._field_search_btn.set_enabled(True)
         if msg.get("error"):
-            messagebox.showerror("Field search failed", msg["error"])
+            self._log_write(f"Field lookup failed: {msg['error']}")
             return
-        fields = msg["fields"]
-        if not fields:
-            messagebox.showinfo(
-                "No matches",
-                f"No observation fields matched “{msg['query']}”.")
-            return
-        self._field_choices = {}
-        values = []
-        for f in fields:
+        items = []
+        for f in msg["fields"]:
             dt = f" · {f['datatype']}" if f.get("datatype") else ""
-            label = f"{f['name']} (#{f['id']}){dt}"
-            self._field_choices[label] = f["id"]
-            values.append(label)
-        self._field_combo["values"] = values
-        self._field_combo_var.set(values[0])
-        self._field_id_var.set(str(self._field_choices[values[0]]))
-        self._log_write(
-            f"Found {len(fields)} field(s) — selected “{values[0]}”. "
-            "Open the dropdown to pick another.")
+            items.append((f"{f['name']} (#{f['id']}){dt}", f["id"]))
+        self._field_widget.show_results(msg["query"], items)
 
-    def _on_field_selected(self, _evt=None):
-        fid = self._field_choices.get(self._field_combo_var.get())
-        if fid is not None:
-            self._field_id_var.set(str(fid))
+    def _field_chosen(self, value, _label):
+        self._field_id_var.set(str(value))
 
     # ----- action bar ------------------------------------------------------ #
     def _build_action_bar(self, parent):
