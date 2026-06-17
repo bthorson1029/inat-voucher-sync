@@ -18,8 +18,10 @@ Note: You must have the photo that contains the specimen and voucher as the **la
    - First it tries to **decode a QR code** (OpenCV `QRCodeDetector`, with
      `pyzbar` as a secondary decoder). The label is located, deskewed, and
      upscaled before decoding so angled field shots still work.
-   - If no QR is found, an optional **OCR fallback** (Tesseract) reads the
-     printed ID off the label.
+   - If no QR is found, an **OCR fallback** reads the printed ID off the label.
+     It's **on by default** (QR codes aren't always angled to decode) and uses
+     a bundled engine that needs no separate install. OCR-derived values are
+     flagged blue for review, since OCR is less certain than a QR read.
 3. **Match** the decoded text against a voucher pattern (regex).
 4. **Decide** an action per observation by comparing the detected voucher to the
    field's current value:
@@ -47,9 +49,19 @@ Nothing is written to iNaturalist until you click **Apply updates** and confirm.
   pip install requests opencv-python numpy
   ```
 
+- **OCR fallback (recommended, on by default):** the bundled `RapidOCR`
+  engine — pip-installable, no separate program to download. The first time
+  you run a preview with OCR on, the app offers to **install it for you**
+  (into its own Python environment). To install it yourself instead:
+
+  ```bash
+  pip install rapidocr-onnxruntime
+  ```
+
 - Optional, for QR decoding robustness: `pyzbar`
-- Optional, for the OCR fallback: `pytesseract` **and** the Tesseract engine
-  itself:
+- Optional, **alternative** OCR engine — Tesseract, for users who already
+  have it. Selectable via the **Engine** picker in the OCR fallback section;
+  needs both the Python wrapper and the engine itself:
 
   ```bash
   pip install pytesseract
@@ -60,7 +72,8 @@ Nothing is written to iNaturalist until you click **Apply updates** and confirm.
   - Debian/Ubuntu: `sudo apt-get install tesseract-ocr`
 
   If `tesseract` isn't on your PATH, point the app at the executable with
-  **Browse…** in the **OCR fallback** section of the window.
+  **Browse…** (the path field appears only when the Tesseract engine is
+  selected).
 
 ## Usage
 
@@ -79,8 +92,9 @@ Then in the window:
    live suggestions — matching iNaturalist fields appear as you type, so you
    don't need to know the numeric ID.
 3. Pick the **code format** that matches your label (see below), and optionally
-   set a **date filter** (single day or range), flip the **Overwrite existing
-   values** toggle, or enable the **OCR fallback**.
+   set a **date filter** (single day or range) or flip the **Overwrite existing
+   values** toggle. The **OCR fallback** is on by default; you can turn it off
+   or switch its **Engine** (built-in vs. Tesseract) in the OCR section.
 4. Click **Preview run** to build the queue — hit **Stop** to abort a scan in
    progress — then review the color-coded results and **Apply updates**.
    **Export CSV** saves the queue, and the collapsible **Run log** at the bottom
