@@ -28,6 +28,7 @@ import sys
 import time
 import threading
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -75,6 +76,12 @@ DEFAULT_FIELD_ID   = 1907
 DEFAULT_VOUCHER_RE = r"\b[A-Za-z]{2,3}-\d{3,4}\b"
 REQUEST_PAUSE      = 0.8
 PER_PAGE           = 200
+# Photos are fetched from iNaturalist's CDN/S3, not the rate-limited write API,
+# so the preview scan can download and decode several observations at once.
+# Each photo still runs through the identical decode path — only the wall-clock
+# overlap changes, not the detection result.  Keep this modest to stay polite
+# to the photo host and bounded in memory (this many originals in flight).
+SCAN_WORKERS       = 6
 
 # Voucher-format presets offered as radio options in the GUI.  Each maps a
 # friendly name to a regex (matching is always case-insensitive); "Custom"
@@ -1223,25 +1230,51 @@ class VoucherSyncApp(tk.Tk):
             q.put({"kind": "log",
                    "text": f"Found {total} observation(s). Scanning photos...\n"})
 
-            rows = []
-            for i, obs in enumerate(obs_list, 1):
-                q.put({"kind": "progress", "value": i, "total": total})
-                row = build_row(client, obs, field_id, voucher_re,
-                                allow_overwrite, use_ocr, tess_cmd)
-                rows.append(row)
-                q.put({"kind": "row", "row": row})
-                ocr_note = " [OCR]" if "ocr" in row.get("reason", "") else ""
-                q.put({
-                    "kind": "log",
-                    "text": (
-                        f"  [{i:>3}/{total}]  #{obs.get('id')}  "
-                        f"{row['taxon'][:36]}  ->  "
-                        f"{row['action'].upper()} ({row['reason']}){ocr_note}"
-                        + (f"  |  {row['detected_voucher']}"
-                           if row["detected_voucher"] else "")
-                    ),
-                })
-                time.sleep(REQUEST_PAUSE)
+            # Scan observations concurrently: photo downloads (I/O) overlap with
+            # QR/OCR decoding (CPU/subprocess) instead of running one-at-a-time.
+            # No REQUEST_PAUSE here — these are CDN photo fetches, not the
+            # rate-limited write API.  Results are stored by original index so
+            # `rows` stays in observation order even though they finish out of
+            # order; the decode itself is unchanged, so detection is identical.
+            rows = [None] * total
+            done = 0
+            with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+                future_to_idx = {
+                    pool.submit(build_row, client, obs, field_id, voucher_re,
+                                allow_overwrite, use_ocr, tess_cmd): idx
+                    for idx, obs in enumerate(obs_list)
+                }
+                for fut in as_completed(future_to_idx):
+                    idx = future_to_idx[fut]
+                    obs = obs_list[idx]
+                    try:
+                        row = fut.result()
+                    except Exception as exc:
+                        row = {
+                            "observation_id": obs.get("id"),
+                            "url": f"{WEB}/observations/{obs.get('id')}",
+                            "taxon": taxon_label(obs),
+                            "upload_date": upload_date(obs),
+                            "detected_voucher": None, "current_value": None,
+                            "field_state": "empty", "action": FLAG,
+                            "reason": f"scan_error: {exc}",
+                            "ofv_id": None, "raw_qr": None, "raw_ocr": None,
+                        }
+                    rows[idx] = row
+                    done += 1
+                    q.put({"kind": "progress", "value": done, "total": total})
+                    q.put({"kind": "row", "row": row})
+                    ocr_note = " [OCR]" if "ocr" in row.get("reason", "") else ""
+                    q.put({
+                        "kind": "log",
+                        "text": (
+                            f"  [{done:>3}/{total}]  #{obs.get('id')}  "
+                            f"{row['taxon'][:36]}  ->  "
+                            f"{row['action'].upper()} ({row['reason']}){ocr_note}"
+                            + (f"  |  {row['detected_voucher']}"
+                               if row["detected_voucher"] else "")
+                        ),
+                    })
 
             q.put({"kind": "preview_done", "rows": rows})
 
