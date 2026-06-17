@@ -2030,7 +2030,11 @@ class VoucherSyncApp(tk.Tk):
         system install, so there we just offer QR-only or cancel.
         """
         import importlib.util
+        # In a frozen build (PyInstaller) the OCR engine is bundled, so this
+        # branch shouldn't be reached — but never offer pip there: there's no
+        # pip, and the bundle's site-packages is read-only.
         can_install = (engine == OCR_RAPIDOCR
+                       and not getattr(sys, "frozen", False)
                        and importlib.util.find_spec("pip") is not None)
         if not can_install:
             if messagebox.askyesno(

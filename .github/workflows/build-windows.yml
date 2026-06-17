@@ -1,0 +1,50 @@
+name: Build Windows executable
+
+# Build the standalone VoucherSync.exe on a clean Windows runner.
+# - On every pull request to main (so we confirm it builds BEFORE merging):
+#   builds + uploads the exe as a downloadable artifact. Runs on all PRs (no
+#   path filter) so the required "build" status check always reports — a
+#   filtered check that never runs would otherwise block merges indefinitely.
+# - Push a tag like v1.0.0 to build AND attach the exe to that GitHub Release.
+# - Or run manually any time from the Actions tab (workflow_dispatch).
+on:
+  pull_request:
+    branches: [main]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # needed to attach the exe to a Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "pyinstaller>=6,<7"
+
+      - name: Build executable
+        run: pyinstaller --noconfirm inat_voucher_sync.spec
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoucherSync-windows
+          path: dist/VoucherSync.exe
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/VoucherSync.exe
