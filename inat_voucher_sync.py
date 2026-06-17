@@ -2113,17 +2113,28 @@ class VoucherSyncApp(tk.Tk):
 
         def worker():
             import subprocess
+            base = [sys.executable, "-m", "pip", "install",
+                    "rapidocr-onnxruntime"]
+            # If a plain install fails (commonly a permissions error on a
+            # system Python), retry with --user, which writes to the user's
+            # own site-packages without admin. --user is invalid inside a
+            # virtualenv, so only add it when we're not in one.
+            in_venv = sys.prefix != sys.base_prefix
+            attempts = [base] if in_venv else [base, base[:4] + ["--user"]
+                                               + base[4:]]
+            out = ""
+            ok = False
             try:
-                proc = subprocess.run(
-                    [sys.executable, "-m", "pip", "install",
-                     "rapidocr-onnxruntime"],
-                    capture_output=True, text=True)
-                result["ok"] = proc.returncode == 0
-                result["out"] = (proc.stdout or "") + (proc.stderr or "")
+                for cmd in attempts:
+                    proc = subprocess.run(cmd, capture_output=True, text=True)
+                    out += (proc.stdout or "") + (proc.stderr or "")
+                    if proc.returncode == 0:
+                        ok = True
+                        break
             except Exception as exc:
-                result["ok"], result["out"] = False, str(exc)
-            finally:
-                self.after(0, dlg.destroy)
+                out += str(exc)
+            result["ok"], result["out"] = ok, out
+            self.after(0, dlg.destroy)
 
         self._center_over_parent(dlg)
         dlg.grab_set()
