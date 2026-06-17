@@ -1,0 +1,20 @@
+# Runtime dependencies for inat_voucher_sync.py
+#
+# Install with:  pip install -r requirements.txt
+# (Tkinter ships with CPython, so it isn't listed here.)
+
+requests
+numpy
+
+# Image decoding / QR. opencv-python-headless is the GUI-less build — this app
+# never calls cv2's highgui (imshow/namedWindow), so headless works and keeps
+# the packaged build noticeably smaller. Swap to opencv-python if you prefer.
+opencv-python-headless
+
+# Bundled OCR fallback engine (pip-only, no system binary). On by default.
+rapidocr-onnxruntime
+
+# --- Optional extras (not required) ---
+# pyzbar          # secondary QR decoder for extra robustness
+# pytesseract     # only if you switch the OCR engine to Tesseract in the GUI
+#                 # (also needs the Tesseract program installed separately)

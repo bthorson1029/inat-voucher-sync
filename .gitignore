@@ -9,6 +9,11 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# PyInstaller build outputs
+build/
+dist/
+*.manifest
+
 # Secrets / local config
 *.token
 *token*.txt

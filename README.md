@@ -10,6 +10,15 @@ voucher numbers in by hand.
 
 Note: You must have the photo that contains the specimen and voucher as the **last** image in your observation.
 
+## Download (Windows)
+
+The easiest way to run it: grab **`VoucherSync.exe`** from the
+[Releases page](../../releases) and double-click it. No Python, no installs —
+OCR is built in. (Windows may show a SmartScreen "unknown publisher" warning
+the first time; choose **More info → Run anyway**.)
+
+Prefer to run from source, or on macOS/Linux? See [Usage](#usage) below.
+
 ## How it works
 
 1. **Fetch** your observations from the iNaturalist API (optionally filtered by
@@ -134,6 +143,32 @@ text from a photo with no label is unlikely to be mistaken for a voucher.
 
 The default selection is set by `DEFAULT_VOUCHER_FORMAT` in the
 `USER CONFIGURATION` block, and the preset patterns live in `VOUCHER_FORMATS`.
+
+## Building the Windows executable
+
+The standalone `VoucherSync.exe` is produced with
+[PyInstaller](https://pyinstaller.org/) from `inat_voucher_sync.spec`, which
+bundles the OCR engine (RapidOCR models + the onnxruntime runtime) so the app
+works with no install.
+
+- **Automatically (recommended):** the
+  [`Build Windows executable`](.github/workflows/build-windows.yml) GitHub
+  Actions workflow builds it on a clean Windows runner. Run it manually from
+  the **Actions** tab to download the exe as a build artifact, or push a tag
+  (`git tag v1.0.0 && git push --tags`) to build it **and** attach it to the
+  matching GitHub Release.
+- **Locally on Windows:**
+
+  ```bash
+  pip install -r requirements.txt pyinstaller
+  pyinstaller --noconfirm inat_voucher_sync.spec
+  # → dist/VoucherSync.exe
+  ```
+
+The build is a single windowed `.exe` (no console). It's large (~hundreds of
+MB) because it bundles opencv, numpy, and the onnxruntime OCR models, and the
+first launch is a little slow as it unpacks. It is unsigned, so Windows
+SmartScreen may warn on first run.
 
 ## Notes
 
