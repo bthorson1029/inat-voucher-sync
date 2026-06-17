@@ -31,10 +31,12 @@ Note: You must have the photo that contains the specimen and voucher as the **la
    | ⚪ Grey | **Skip** | Field already holds the correct value |
    | 🟡 Amber | **Flag** | Detected voucher conflicts with an existing value |
 
-5. **Review** the color-coded preview queue, then **Apply** the updates — or
-   **export the queue to CSV** for record-keeping.
+5. **Review** the color-coded preview queue — summary chips tally the
+   update / skip / flag counts — then **Apply updates**, or **export the queue
+   to CSV** for record-keeping. A long scan can be aborted mid-run with
+   **Stop**.
 
-Nothing is written to iNaturalist until you click **Apply Updates** and confirm.
+Nothing is written to iNaturalist until you click **Apply updates** and confirm.
 
 ## Requirements
 
@@ -57,8 +59,8 @@ Nothing is written to iNaturalist until you click **Apply Updates** and confirm.
   - macOS: `brew install tesseract`
   - Debian/Ubuntu: `sudo apt-get install tesseract-ocr`
 
-  If `tesseract` isn't on your PATH, you can point the app at the executable
-  from the OCR fallback row in the GUI.
+  If `tesseract` isn't on your PATH, point the app at the executable with
+  **Browse…** in the **OCR fallback** section of the window.
 
 ## Usage
 
@@ -70,11 +72,19 @@ Then in the window:
 
 1. **Paste your API token.** Get one at
    https://www.inaturalist.org/users/api_token. The token can also be loaded
-   from a file or from the `INAT_API_TOKEN` environment variable.
-2. Set your **username**, the **field ID** to write to, and pick the **voucher
-   format** that matches your label (see below).
-3. (Optional) Set a **date filter** and/or enable the **OCR fallback**.
-4. Click **Preview** to build the queue, review it, then **Apply Updates**.
+   from a file or from the `INAT_API_TOKEN` environment variable. Once it
+   verifies, the status pill in the top-right turns green and shows your login.
+2. Enter your **username**, then choose the **observation field** to write to:
+   start typing its name in the **Observation field** box and pick from the
+   live suggestions — matching iNaturalist fields appear as you type, so you
+   don't need to know the numeric ID.
+3. Pick the **code format** that matches your label (see below), and optionally
+   set a **date filter** (single day or range), flip the **Overwrite existing
+   values** toggle, or enable the **OCR fallback**.
+4. Click **Preview run** to build the queue — hit **Stop** to abort a scan in
+   progress — then review the color-coded results and **Apply updates**.
+   **Export CSV** saves the queue, and the collapsible **Run log** at the bottom
+   expands for a line-by-line trace.
 
 ### Configuration defaults
 
@@ -85,16 +95,19 @@ if you'd rather not retype them each session.
 | Setting | Default | Notes |
 |---------|---------|-------|
 | Username | *(blank)* | Your iNaturalist login — required |
-| Field ID | `1907` | The public "Personal voucher number" observation field |
-| Voucher format | Prefix-Number | See the format picker below |
+| Observation field | Personal voucher number (`#1907`) | The public field vouchers are written to |
+| Code format | Prefix-Number | See the format picker below |
 
-To use a different observation field, find its numeric ID on iNaturalist and
-update the **Field ID** value.
+To target a different field, just start typing its name in the **Observation
+field** box and pick from the live suggestions — the numeric ID is resolved for
+you. You can also change the starting field via `DEFAULT_FIELD_NAME` /
+`DEFAULT_FIELD_ID` in the `USER CONFIGURATION` block.
 
-### Voucher format
+### Code format
 
-The **Voucher format** picker chooses how a voucher ID is recognized in the
-decoded QR/OCR text. Pick a preset, or **Custom** to type your own regex.
+The **Code format** control (under **Voucher matching**) chooses how a voucher
+ID is recognized in the decoded QR/OCR text. Pick a preset, or **Custom** to
+type your own regex.
 Matching is always case-insensitive, and the presets are word-bounded so stray
 text from a photo with no label is unlikely to be mistaken for a voucher.
 
