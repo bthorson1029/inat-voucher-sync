@@ -455,16 +455,65 @@ def _label_candidates(img, max_candidates=4):
 
 
 _RAPIDOCR = None
+_RAPIDOCR_LOCK = threading.Lock()
 
 
 def _rapidocr_engine():
     """Lazily construct the bundled RapidOCR engine (loads ONNX models once,
-    then reuses the instance for every subsequent observation)."""
+    then reuses the instance for every subsequent observation).
+
+    Guarded by a lock: the preview scan runs several workers concurrently, so
+    without it the first QR failures could each try to build the engine at
+    once."""
     global _RAPIDOCR
     if _RAPIDOCR is None:
-        from rapidocr_onnxruntime import RapidOCR
-        _RAPIDOCR = RapidOCR()
+        with _RAPIDOCR_LOCK:
+            if _RAPIDOCR is None:
+                from rapidocr_onnxruntime import RapidOCR
+                _RAPIDOCR = RapidOCR()
     return _RAPIDOCR
+
+
+def ocr_engine_available(engine, tesseract_cmd=None):
+    """Check whether the selected OCR engine can actually run, *before* a scan
+    starts, so a missing dependency is reported once with install guidance
+    rather than stamped on every flagged row.
+
+    Returns (ok, message); `message` is a user-facing hint when not ok.
+    """
+    import importlib.util
+
+    if engine == OCR_TESSERACT:
+        if importlib.util.find_spec("pytesseract") is None:
+            return False, (
+                "The Tesseract OCR engine isn't set up.\n\n"
+                "Install the Python wrapper:\n"
+                "    pip install pytesseract\n\n"
+                "…and the Tesseract program itself (see the README).")
+        try:
+            import pytesseract
+            cmd = tesseract_cmd or ""
+            if not cmd and os.path.isfile(_WIN_TESS_DEFAULT):
+                cmd = _WIN_TESS_DEFAULT
+            if cmd:
+                pytesseract.pytesseract.tesseract_cmd = cmd
+            pytesseract.get_tesseract_version()
+        except Exception:
+            return False, (
+                "The Tesseract program wasn't found.\n\n"
+                "Install it (see the README), or point the app at "
+                "tesseract.exe with Browse….")
+        return True, ""
+
+    # Bundled default engine.
+    if importlib.util.find_spec("rapidocr_onnxruntime") is None:
+        return False, (
+            "The built-in OCR engine isn't installed yet.\n\n"
+            "Install it with:\n"
+            "    pip install rapidocr-onnxruntime\n\n"
+            "Or switch the OCR engine to Tesseract, or turn the OCR fallback "
+            "off to scan QR codes only.")
+    return True, ""
 
 
 def ocr_fallback(img, cache, voucher_re, engine=DEFAULT_OCR_ENGINE,
@@ -1976,20 +2025,39 @@ class VoucherSyncApp(tk.Tk):
     def _start_preview(self):
         if not self._validate():
             return
+
+        use_ocr      = self._ocr_var.get()
+        ocr_engine   = self._ocr_engine_var.get()
+        tess_cmd     = (self._tess_var.get().strip()
+                        if use_ocr and ocr_engine == OCR_TESSERACT else None)
+
+        # Pre-flight: if OCR is on but its engine isn't available, say so once
+        # (with install guidance) and offer to scan QR-only, instead of
+        # flagging every QR failure with a cryptic "engine not installed".
+        ocr_downgraded = False
+        if use_ocr:
+            ok, msg = ocr_engine_available(ocr_engine, tess_cmd)
+            if not ok:
+                if not messagebox.askyesno(
+                        "OCR engine unavailable",
+                        msg + "\n\nScan QR codes only for this run?"):
+                    return
+                use_ocr = False
+                ocr_downgraded = True
+
         self._clear()
         self._cancel.clear()
         self._set_busy(True)
         self._set_preview_mode("stop")
+        if ocr_downgraded:
+            self._log_write("OCR engine unavailable — scanning QR codes only "
+                            "for this run.")
 
         token        = self._token_var.get().strip()
         user         = self._user_var.get().strip()
         field_id     = int(self._field_id_var.get())
         voucher_re   = re.compile(self._regex_var.get(), re.IGNORECASE)
         allow_ow     = self._overwrite_var.get()
-        use_ocr      = self._ocr_var.get()
-        ocr_engine   = self._ocr_engine_var.get()
-        tess_cmd     = (self._tess_var.get().strip()
-                        if use_ocr and ocr_engine == OCR_TESSERACT else None)
         d1, d2       = self._get_dates()
 
         threading.Thread(
