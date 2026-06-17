@@ -6,7 +6,9 @@ A self-contained desktop GUI for syncing physical voucher IDs to
 If you photograph a printed label (with a QR code and/or printed ID) alongside
 each specimen, this tool reads the voucher ID straight out of your observation
 photos and writes it into a custom observation field — so you never have to type
-voucher numbers in by hand.
+voucher numbers in by hand. 
+
+Note: You must have the photo that contains the specimen and voucher as the **last** image in your observation.
 
 ## How it works
 
