@@ -54,10 +54,23 @@ API        = "https://api.inaturalist.org/v1"
 WEB        = "https://www.inaturalist.org"
 USER_AGENT = "inat-voucher-sync/1.0 (personal voucher tooling)"
 
-DEFAULT_USER       = "bthorson"
+# ---------------------------------------------------------------------------
+# USER CONFIGURATION
+# These are the starting values shown in the GUI. Every one of them can be
+# changed in the window at runtime — edit them here only to set your own
+# defaults so you don't have to retype them each session.
+# ---------------------------------------------------------------------------
+# Your iNaturalist login. Leave blank to be prompted for it in the GUI.
+DEFAULT_USER       = ""
+# The observation field to write vouchers into. "Personal voucher number"
+# (ID 1907) is a public iNaturalist field; change the ID to target a different
+# field (find its numeric ID on the field's page on inaturalist.org).
 DEFAULT_FIELD_NAME = "Personal voucher number"
 DEFAULT_FIELD_ID   = 1907
-DEFAULT_VOUCHER_RE = r"BT-\d{3,}"
+# Regex matching your label/voucher format. Matching is case-insensitive.
+# The default accepts a 1–4 letter prefix and 2+ digits, e.g. "BT-001",
+# "ABC12", "A-99" — narrow it to your own scheme to avoid false positives.
+DEFAULT_VOUCHER_RE = r"[A-Za-z]{1,4}-?\d{2,}"
 REQUEST_PAUSE      = 0.8
 PER_PAGE           = 200
 
@@ -904,6 +917,12 @@ class VoucherSyncApp(tk.Tk):
                 f"Get one at: {WEB}/users/api_token",
             )
             return False
+        if not self._user_var.get().strip():
+            messagebox.showwarning(
+                "Username required",
+                "Enter your iNaturalist username before proceeding.",
+            )
+            return False
         try:
             int(self._field_id_var.get())
         except ValueError:
@@ -1077,7 +1096,7 @@ class VoucherSyncApp(tk.Tk):
         self._set_busy(True)
 
         token        = self._token_var.get().strip()
-        user         = self._user_var.get().strip() or DEFAULT_USER
+        user         = self._user_var.get().strip()
         field_id     = int(self._field_id_var.get())
         voucher_re   = re.compile(self._regex_var.get(), re.IGNORECASE)
         allow_ow     = self._overwrite_var.get()

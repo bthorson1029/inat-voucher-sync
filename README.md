@@ -76,16 +76,19 @@ Then in the window:
 
 ### Configuration defaults
 
-The app ships with the author's defaults; change these for your own use:
+Every setting is editable in the GUI. The starting values live in a
+`USER CONFIGURATION` block at the top of `inat_voucher_sync.py` — set them there
+if you'd rather not retype them each session.
 
 | Setting | Default | Notes |
 |---------|---------|-------|
-| Username | `bthorson` | Your iNaturalist login |
-| Field ID | `1907` | The "Personal voucher number" observation field |
-| Voucher regex | `BT-\d{3,}` | Matches IDs like `BT-001`, `BT-1234` |
+| Username | *(blank)* | Your iNaturalist login — required |
+| Field ID | `1907` | The public "Personal voucher number" observation field |
+| Voucher regex | `[A-Za-z]{1,4}-?\d{2,}` | Matches e.g. `BT-001`, `ABC12`, `A-99` (case-insensitive) |
 
 To use a different observation field, find its numeric ID on iNaturalist and
-update the **Field ID** value.
+update the **Field ID** value. Narrow the voucher regex to your own label
+scheme to avoid false matches.
 
 ## Notes
 
