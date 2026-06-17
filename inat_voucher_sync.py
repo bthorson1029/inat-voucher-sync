@@ -68,11 +68,29 @@ DEFAULT_USER       = ""
 DEFAULT_FIELD_NAME = "Personal voucher number"
 DEFAULT_FIELD_ID   = 1907
 # Regex matching your label/voucher format. Matching is case-insensitive.
-# The default accepts a 1–4 letter prefix and 2+ digits, e.g. "BT-001",
-# "ABC12", "A-99" — narrow it to your own scheme to avoid false positives.
-DEFAULT_VOUCHER_RE = r"[A-Za-z]{1,4}-?\d{2,}"
+# The default accepts a 2–3 letter prefix, a hyphen, and 3–4 digits, e.g.
+# "BT-001", "ABC-1234". The required hyphen, fixed digit count, and word
+# boundaries keep OCR noise from being mistaken for a voucher; widen or
+# narrow it to match your own scheme.
+DEFAULT_VOUCHER_RE = r"\b[A-Za-z]{2,3}-\d{3,4}\b"
 REQUEST_PAUSE      = 0.8
 PER_PAGE           = 200
+
+# Voucher-format presets offered as radio options in the GUI.  Each maps a
+# friendly name to a regex (matching is always case-insensitive); "Custom"
+# is a sentinel of None that unlocks the regex box for a hand-written pattern.
+# The patterns are word-bounded and require enough structure that stray OCR
+# text from a photo with no label is unlikely to match.
+VOUCHER_FORMATS = [
+    ("Prefix-Number", DEFAULT_VOUCHER_RE),              # BT-001, ABC-1234
+    ("Numbers only",  r"\b\d{3,6}\b"),                  # 00421, 123456
+    # Alphanumeric: 4–10 chars containing at least one letter and one digit,
+    # so it won't collapse into "any word" or "any number".
+    ("Alphanumeric",
+     r"\b(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{4,10}\b"),
+    ("Custom", None),
+]
+DEFAULT_VOUCHER_FORMAT = VOUCHER_FORMATS[0][0]
 
 UPDATE = "update"
 SKIP   = "skip"
@@ -189,17 +207,33 @@ def _image_variants(img):
     yield cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
 
-def decode_qr(image_bytes):
+def load_image(image_bytes):
+    """Decode raw image bytes to a BGR ndarray.  Returns (img, error)."""
     try:
         import cv2
         import numpy as np
     except ImportError:
         return None, "cv2_not_installed"
-
     arr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         return None, "image_decode_failed"
+    return img, None
+
+
+def _get_candidates(img, cache):
+    """
+    Return the ranked label-region crops for `img`, computing them at most
+    once per image.  `cache` is a per-observation dict shared between the QR
+    and OCR passes so the expensive detection isn't repeated.
+    """
+    if "candidates" not in cache:
+        cache["candidates"] = _label_candidates(img)
+    return cache["candidates"]
+
+
+def decode_qr(img, cache):
+    import cv2
 
     detector = cv2.QRCodeDetector()
     for variant in _image_variants(img):
@@ -222,7 +256,7 @@ def decode_qr(image_bytes):
     # crops.  OpenCV often locates a QR in the full frame but fails to decode
     # it at that scale; the perspective-corrected crop is far more decodable.
     try:
-        for crop in _label_candidates(img):
+        for crop in _get_candidates(img, cache):
             for variant in (crop,
                             cv2.threshold(crop, 0, 255,
                                           cv2.THRESH_BINARY
@@ -252,7 +286,7 @@ def decode_qr(image_bytes):
                     return res.data.decode("utf-8", "replace"), None
         # pyzbar on the label crops too.
         try:
-            for crop in _label_candidates(img):
+            for crop in _get_candidates(img, cache):
                 for res in zbar_decode(crop):
                     if res.data:
                         return res.data.decode("utf-8", "replace"), None
@@ -383,10 +417,12 @@ def _label_candidates(img, max_candidates=4):
     return crops
 
 
-def ocr_fallback(image_bytes, voucher_re, tesseract_cmd=None):
+def ocr_fallback(img, cache, voucher_re, tesseract_cmd=None):
     """
     Try to read the voucher ID from the image using Tesseract OCR.
-    Called only when QR decoding has already failed.
+    Called only when QR decoding has already failed.  `img` is the decoded
+    BGR image and `cache` is the per-observation candidate cache shared with
+    decode_qr, so label detection is not repeated here.
 
     Two-pass strategy:
       Pass 1 — detect and isolate the white label, perspective-correct the
@@ -402,11 +438,7 @@ def ocr_fallback(image_bytes, voucher_re, tesseract_cmd=None):
     except ImportError:
         return None, None, "pytesseract_not_installed"
 
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return None, None, "cv2_not_installed"
+    import cv2
 
     # Resolve Tesseract executable path.
     cmd = tesseract_cmd or ""
@@ -415,13 +447,12 @@ def ocr_fallback(image_bytes, voucher_re, tesseract_cmd=None):
     if cmd:
         pytesseract.pytesseract.tesseract_cmd = cmd
 
-    arr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        return None, None, "image_decode_failed"
-
-    # Whitelist: dash at end avoids any range-interpretation ambiguity.
-    WL = "-c tessedit_char_whitelist=BT0123456789bt-"
+    # Whitelist limits OCR to characters that appear in a voucher (letters,
+    # digits, hyphen), which sharply cuts misreads; the regex still decides
+    # what counts as a valid voucher.  Dash last avoids range ambiguity.
+    WL = ("-c tessedit_char_whitelist="
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+          "abcdefghijklmnopqrstuvwxyz0123456789-")
     last_raw = None
 
     # ------------------------------------------------------------------ #
@@ -431,7 +462,7 @@ def ocr_fallback(image_bytes, voucher_re, tesseract_cmd=None):
     # voucher.  This is what lets the scanner pick the label over a bright
     # mushroom cap or leaf that might score on size alone.
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    for crop in _label_candidates(img):
+    for crop in _get_candidates(img, cache):
         _, otsu_crop = cv2.threshold(
             crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         clahe_crop = clahe.apply(crop)
@@ -539,13 +570,21 @@ def build_row(client, obs, field_id, voucher_re, allow_overwrite,
         row["action"], row["reason"] = FLAG, f"photo_download_failed: {exc}"
         return row
 
-    text, qr_err = decode_qr(image_bytes)
+    img, dec_err = load_image(image_bytes)
+    if dec_err:
+        row["action"], row["reason"] = FLAG, dec_err
+        return row
+
+    # Per-observation cache: label-region detection is computed at most once
+    # and reused across the QR second pass and the OCR fallback.
+    cache = {}
+    text, qr_err = decode_qr(img, cache)
 
     if qr_err:
         # QR failed — try OCR if enabled, otherwise flag.
         if use_ocr:
             voucher, raw_ocr, ocr_err = ocr_fallback(
-                image_bytes, voucher_re, tesseract_cmd)
+                img, cache, voucher_re, tesseract_cmd)
             row["raw_ocr"] = raw_ocr
             if voucher:
                 row["detected_voucher"] = voucher
@@ -700,17 +739,29 @@ class VoucherSyncApp(tk.Tk):
         ttk.Entry(parent, textvariable=self._field_id_var, width=8).grid(
             row=1, column=3, sticky="w", pady=4)
 
-        ttk.Label(parent, text="Voucher regex:").grid(
-            row=1, column=4, sticky="e", padx=(16, 6), pady=4)
+        # Voucher format row — pick a preset or "Custom" to type a regex.
+        ttk.Label(parent, text="Voucher format:").grid(
+            row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        vf = ttk.Frame(parent)
+        vf.grid(row=2, column=1, columnspan=5, sticky="w", pady=4)
+
+        self._format_var = tk.StringVar(value=DEFAULT_VOUCHER_FORMAT)
+        for name, _pat in VOUCHER_FORMATS:
+            ttk.Radiobutton(vf, text=name, variable=self._format_var,
+                            value=name,
+                            command=self._on_format_change).pack(
+                side="left", padx=(0, 10))
+
         self._regex_var = tk.StringVar(value=DEFAULT_VOUCHER_RE)
-        ttk.Entry(parent, textvariable=self._regex_var, width=18).grid(
-            row=1, column=5, sticky="w", pady=4)
+        self._regex_entry = ttk.Entry(vf, textvariable=self._regex_var,
+                                      width=26)
+        self._regex_entry.pack(side="left", padx=(6, 0))
 
         # Date row
         ttk.Label(parent, text="Date filter:").grid(
-            row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+            row=3, column=0, sticky="e", padx=(0, 6), pady=4)
         df = ttk.Frame(parent)
-        df.grid(row=2, column=1, columnspan=5, sticky="w", pady=4)
+        df.grid(row=3, column=1, columnspan=5, sticky="w", pady=4)
 
         self._date_mode = tk.StringVar(value="single")
         ttk.Radiobutton(df, text="Single date", variable=self._date_mode,
@@ -746,13 +797,13 @@ class VoucherSyncApp(tk.Tk):
         self._overwrite_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(parent, text="Allow overwrite of existing values",
                         variable=self._overwrite_var).grid(
-            row=3, column=1, columnspan=4, sticky="w", pady=(2, 4))
+            row=4, column=1, columnspan=4, sticky="w", pady=(2, 4))
 
         # OCR fallback row
         ttk.Label(parent, text="OCR fallback:").grid(
-            row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+            row=5, column=0, sticky="e", padx=(0, 6), pady=4)
         ocr_frame = ttk.Frame(parent)
-        ocr_frame.grid(row=4, column=1, columnspan=5, sticky="w", pady=4)
+        ocr_frame.grid(row=5, column=1, columnspan=5, sticky="w", pady=4)
 
         self._ocr_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(ocr_frame,
@@ -779,6 +830,17 @@ class VoucherSyncApp(tk.Tk):
                   foreground="#888").pack(side="left")
 
         self._toggle_dates()
+        self._on_format_change()
+
+    def _on_format_change(self):
+        """Apply the selected voucher-format preset, or unlock the regex box
+        for the Custom option."""
+        pattern = dict(VOUCHER_FORMATS).get(self._format_var.get())
+        if pattern is None:                      # Custom
+            self._regex_entry.configure(state="normal")
+        else:
+            self._regex_var.set(pattern)
+            self._regex_entry.configure(state="readonly")
 
     def _toggle_dates(self):
         single = self._date_mode.get() == "single"

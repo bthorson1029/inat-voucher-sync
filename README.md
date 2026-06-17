@@ -69,8 +69,8 @@ Then in the window:
 1. **Paste your API token.** Get one at
    https://www.inaturalist.org/users/api_token. The token can also be loaded
    from a file or from the `INAT_API_TOKEN` environment variable.
-2. Set your **username**, the **field ID** to write to, and the **voucher
-   regex** that matches your label format.
+2. Set your **username**, the **field ID** to write to, and pick the **voucher
+   format** that matches your label (see below).
 3. (Optional) Set a **date filter** and/or enable the **OCR fallback**.
 4. Click **Preview** to build the queue, review it, then **Apply Updates**.
 
@@ -84,11 +84,27 @@ if you'd rather not retype them each session.
 |---------|---------|-------|
 | Username | *(blank)* | Your iNaturalist login — required |
 | Field ID | `1907` | The public "Personal voucher number" observation field |
-| Voucher regex | `[A-Za-z]{1,4}-?\d{2,}` | Matches e.g. `BT-001`, `ABC12`, `A-99` (case-insensitive) |
+| Voucher format | Prefix-Number | See the format picker below |
 
 To use a different observation field, find its numeric ID on iNaturalist and
-update the **Field ID** value. Narrow the voucher regex to your own label
-scheme to avoid false matches.
+update the **Field ID** value.
+
+### Voucher format
+
+The **Voucher format** picker chooses how a voucher ID is recognized in the
+decoded QR/OCR text. Pick a preset, or **Custom** to type your own regex.
+Matching is always case-insensitive, and the presets are word-bounded so stray
+text from a photo with no label is unlikely to be mistaken for a voucher.
+
+| Option | Pattern | Matches |
+|--------|---------|---------|
+| **Prefix-Number** (default) | `\b[A-Za-z]{2,3}-\d{3,4}\b` | 2–3 letters + hyphen + 3–4 digits — `BT-001`, `ABC-1234` |
+| **Numbers only** | `\b\d{3,6}\b` | 3–6 digits — `00421`, `123456` |
+| **Alphanumeric** | `\b…[A-Za-z0-9]{4,10}\b` | 4–10 chars with at least one letter *and* one digit — `AB12`, `A1B2C3` |
+| **Custom** | *(your regex)* | Whatever you enter; the box unlocks when selected |
+
+The default selection is set by `DEFAULT_VOUCHER_FORMAT` in the
+`USER CONFIGURATION` block, and the preset patterns live in `VOUCHER_FORMATS`.
 
 ## Notes
 
