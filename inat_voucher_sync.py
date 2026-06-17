@@ -9,9 +9,14 @@ are required.
 Requirements:
   pip install requests opencv-python numpy
 
-Optional OCR fallback (reads the printed voucher ID when the QR code fails):
+OCR fallback reads the printed voucher ID when the QR code can't be decoded.
+It is ON by default and uses the bundled, pip-only RapidOCR engine (no system
+install):
+  pip install rapidocr-onnxruntime
+
+Optionally, the OCR engine can be switched to Tesseract in the GUI (for users
+who already have it). That path additionally needs the Tesseract engine itself:
   pip install pytesseract
-  # Also install the Tesseract engine itself:
   # Windows: https://github.com/UB-Mannheim/tesseract/wiki  (grab the installer)
   # macOS:   brew install tesseract
   # Debian:  sudo apt-get install tesseract-ocr
@@ -104,6 +109,12 @@ DEFAULT_VOUCHER_FORMAT = VOUCHER_FORMATS[0][0]
 UPDATE = "update"
 SKIP   = "skip"
 FLAG   = "flag"
+
+# OCR engines. "rapidocr" is the bundled default (pip-installable, no system
+# binary); "tesseract" is the optional engine for users who already have it.
+OCR_RAPIDOCR = "rapidocr"
+OCR_TESSERACT = "tesseract"
+DEFAULT_OCR_ENGINE = OCR_RAPIDOCR
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +454,87 @@ def _label_candidates(img, max_candidates=4):
     return crops
 
 
-def ocr_fallback(img, cache, voucher_re, tesseract_cmd=None):
+_RAPIDOCR = None
+
+
+def _rapidocr_engine():
+    """Lazily construct the bundled RapidOCR engine (loads ONNX models once,
+    then reuses the instance for every subsequent observation)."""
+    global _RAPIDOCR
+    if _RAPIDOCR is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _RAPIDOCR = RapidOCR()
+    return _RAPIDOCR
+
+
+def ocr_fallback(img, cache, voucher_re, engine=DEFAULT_OCR_ENGINE,
+                 tesseract_cmd=None):
+    """Read the voucher ID from `img` when QR decoding has failed.
+
+    Dispatches to the selected OCR engine.  `cache` is the per-observation
+    candidate cache shared with decode_qr, so label detection is not repeated.
+    Returns (voucher_id, raw_ocr_text, error_string).
+    """
+    if engine == OCR_TESSERACT:
+        return _ocr_tesseract(img, cache, voucher_re, tesseract_cmd)
+    return _ocr_rapidocr(img, cache, voucher_re)
+
+
+def _ocr_rapidocr(img, cache, voucher_re):
+    """Bundled OCR path (RapidOCR / ONNX runtime) — no system binary required.
+
+    Runs the recognizer over the ranked, deskewed label crops first (most
+    reliable), then the full frame as a last resort, matching the voucher
+    pattern against each recognized text segment and their concatenation.
+    Returns (voucher_id, raw_ocr_text, error_string).
+    """
+    try:
+        engine = _rapidocr_engine()
+    except ImportError:
+        return None, None, "rapidocr_not_installed"
+    except Exception as exc:
+        return None, None, f"rapidocr_init_failed: {exc}"
+
+    import cv2
+
+    def _scan(image):
+        """Run one RapidOCR pass; return (voucher_or_None, last_text)."""
+        try:
+            result, _ = engine(image)
+        except Exception:
+            return None, None
+        if not result:
+            return None, None
+        texts = [seg[1] for seg in result if len(seg) >= 2 and seg[1]]
+        for text in texts:
+            voucher = extract_voucher(text, voucher_re)
+            if voucher:
+                return voucher, text
+        # Try the joined line too, in case the ID was split across boxes.
+        joined = " ".join(texts)
+        voucher = extract_voucher(joined, voucher_re)
+        if voucher:
+            return voucher, joined
+        return None, (texts[-1] if texts else None)
+
+    last_raw = None
+    # Pass 1 — ranked, deskewed label crops (grayscale → BGR for the engine).
+    for crop in _get_candidates(img, cache):
+        voucher, raw = _scan(cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR))
+        last_raw = raw or last_raw
+        if voucher:
+            return voucher, last_raw, None
+
+    # Pass 2 — the full frame, in case label detection missed the label.
+    voucher, raw = _scan(img)
+    last_raw = raw or last_raw
+    if voucher:
+        return voucher, last_raw, None
+
+    return None, last_raw, "ocr_no_match"
+
+
+def _ocr_tesseract(img, cache, voucher_re, tesseract_cmd=None):
     """
     Try to read the voucher ID from the image using Tesseract OCR.
     Called only when QR decoding has already failed.  `img` is the decoded
@@ -563,7 +654,8 @@ def upload_date(obs):
 # Row builder
 # ---------------------------------------------------------------------------
 def build_row(client, obs, field_id, voucher_re, allow_overwrite,
-              use_ocr=False, tesseract_cmd=None):
+              use_ocr=False, tesseract_cmd=None,
+              ocr_engine=DEFAULT_OCR_ENGINE):
     obs_id = obs.get("id")
     row = {
         "observation_id":   obs_id,
@@ -610,7 +702,7 @@ def build_row(client, obs, field_id, voucher_re, allow_overwrite,
         # QR failed — try OCR if enabled, otherwise flag.
         if use_ocr:
             voucher, raw_ocr, ocr_err = ocr_fallback(
-                img, cache, voucher_re, tesseract_cmd)
+                img, cache, voucher_re, ocr_engine, tesseract_cmd)
             row["raw_ocr"] = raw_ocr
             if voucher:
                 row["detected_voucher"] = voucher
@@ -1311,12 +1403,14 @@ class VoucherSyncApp(tk.Tk):
 
     def _build_ocr_card(self, c):
         bg = COL["header_bg"]
-        row = tk.Frame(c, bg=bg)
-        row.pack(fill="x")
+        top = tk.Frame(c, bg=bg)
+        top.pack(fill="x")
 
-        left = tk.Frame(row, bg=bg)
+        left = tk.Frame(top, bg=bg)
         left.pack(side="left")
-        self._ocr_var = tk.BooleanVar(value=False)
+        # On by default: QR codes aren't always positioned to decode, so OCR
+        # quietly fills the gaps. OCR-derived rows stay flagged for review.
+        self._ocr_var = tk.BooleanVar(value=True)
         self._ocr_toggle = Switch(left, self._ocr_var,
                                   command=self._toggle_ocr)
         self._ocr_toggle.pack(side="left", padx=(0, 11))
@@ -1324,17 +1418,30 @@ class VoucherSyncApp(tk.Tk):
         ltxt.pack(side="left")
         tk.Label(ltxt, text="OCR fallback", bg=bg, fg=COL["text"],
                  font=F["label"]).pack(anchor="w")
-        tk.Label(ltxt, text="Reads text when QR scan fails · pytesseract",
+        tk.Label(ltxt, text="Reads the printed ID when a QR scan fails · "
+                            "results flagged for review",
                  bg=bg, fg=COL["muted"], font=F["help"]).pack(anchor="w")
 
-        tk.Frame(row, bg=COL["card_border"], width=1).pack(
-            side="left", fill="y", padx=20)
+        # Engine picker — bundled (no install) vs. a system Tesseract.
+        engine_box = tk.Frame(top, bg=bg)
+        engine_box.pack(side="right")
+        tk.Label(engine_box, text="ENGINE", bg=bg, fg=COL["muted"],
+                 font=F["eyebrow"]).pack(anchor="e", pady=(0, 5))
+        self._ocr_engine_var = tk.StringVar(value=DEFAULT_OCR_ENGINE)
+        SegmentedControl(
+            engine_box,
+            [("Built-in", OCR_RAPIDOCR), ("Tesseract", OCR_TESSERACT)],
+            self._ocr_engine_var,
+            command=self._on_ocr_engine_change).pack(anchor="e")
 
-        right = tk.Frame(row, bg=bg)
-        right.pack(side="left", fill="x", expand=True)
-        tk.Label(right, text="TESSERACT PATH", bg=bg, fg=COL["muted"],
-                 font=F["eyebrow"]).pack(anchor="w", pady=(0, 5))
-        prow = tk.Frame(right, bg=bg)
+        # Tesseract path — only relevant (and shown) for the Tesseract engine.
+        self._tess_row = tk.Frame(c, bg=bg)
+        tk.Frame(self._tess_row, bg=COL["card_border"], height=1).pack(
+            fill="x", pady=(14, 11))
+        tk.Label(self._tess_row, text="TESSERACT PATH", bg=bg,
+                 fg=COL["muted"], font=F["eyebrow"]).pack(anchor="w",
+                                                          pady=(0, 5))
+        prow = tk.Frame(self._tess_row, bg=bg)
         prow.pack(fill="x")
         self._tess_var = tk.StringVar()
         self._tess_entry = tk.Entry(
@@ -1348,6 +1455,10 @@ class VoucherSyncApp(tk.Tk):
         self._tess_browse_btn = self._secondary_btn(
             prow, "Browse…", self._browse_tesseract, padx=14)
         self._tess_browse_btn.pack(side="left", padx=(8, 0))
+        # _tess_row is packed/hidden by _toggle_ocr based on the engine.
+
+    def _on_ocr_engine_change(self):
+        self._toggle_ocr()
 
     def _on_format_change(self):
         """Apply the selected voucher-format preset, or unlock the regex box
@@ -1374,8 +1485,13 @@ class VoucherSyncApp(tk.Tk):
 
     def _toggle_ocr(self):
         on = self._ocr_var.get()
-        self._tess_entry.configure(state="normal" if on else "disabled")
-        self._tess_browse_btn.set_enabled(on)
+        tess = on and self._ocr_engine_var.get() == OCR_TESSERACT
+        if tess:
+            self._tess_row.pack(fill="x")
+        else:
+            self._tess_row.pack_forget()
+        self._tess_entry.configure(state="normal" if tess else "disabled")
+        self._tess_browse_btn.set_enabled(tess)
 
     def _browse_tesseract(self):
         path = filedialog.askopenfilename(
@@ -1871,18 +1987,21 @@ class VoucherSyncApp(tk.Tk):
         voucher_re   = re.compile(self._regex_var.get(), re.IGNORECASE)
         allow_ow     = self._overwrite_var.get()
         use_ocr      = self._ocr_var.get()
-        tess_cmd     = self._tess_var.get().strip() if use_ocr else None
+        ocr_engine   = self._ocr_engine_var.get()
+        tess_cmd     = (self._tess_var.get().strip()
+                        if use_ocr and ocr_engine == OCR_TESSERACT else None)
         d1, d2       = self._get_dates()
 
         threading.Thread(
             target=self._preview_worker,
             args=(token, user, field_id, voucher_re, allow_ow,
-                  use_ocr, tess_cmd, d1, d2),
+                  use_ocr, ocr_engine, tess_cmd, d1, d2),
             daemon=True,
         ).start()
 
     def _preview_worker(self, token, user, field_id, voucher_re,
-                        allow_overwrite, use_ocr, tess_cmd, d1, d2):
+                        allow_overwrite, use_ocr, ocr_engine, tess_cmd,
+                        d1, d2):
         q = self._mq
         try:
             client = INatClient(token=token)
@@ -1896,8 +2015,10 @@ class VoucherSyncApp(tk.Tk):
             q.put({"kind": "log", "text": f"Authenticated as {login}"})
             q.put({"kind": "connected", "login": login})
             if use_ocr:
+                engine_name = ("Tesseract" if ocr_engine == OCR_TESSERACT
+                               else "built-in")
                 q.put({"kind": "log",
-                       "text": "OCR fallback enabled (pytesseract)."})
+                       "text": f"OCR fallback enabled ({engine_name})."})
 
             window = d1 if d1 == d2 else f"{d1} to {d2}"
             q.put({"kind": "log",
@@ -1939,7 +2060,8 @@ class VoucherSyncApp(tk.Tk):
             pool = ThreadPoolExecutor(max_workers=SCAN_WORKERS)
             future_to_idx = {
                 pool.submit(build_row, client, obs, field_id, voucher_re,
-                            allow_overwrite, use_ocr, tess_cmd): idx
+                            allow_overwrite, use_ocr, tess_cmd,
+                            ocr_engine): idx
                 for idx, obs in enumerate(obs_list)
             }
             try:
