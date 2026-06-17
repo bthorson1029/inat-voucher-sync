@@ -30,8 +30,10 @@ import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import datetime
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
+from tkinter import font as tkfont
 
 # ---------------------------------------------------------------------------
 # Dependency check — friendly error before the window opens
@@ -643,22 +645,192 @@ def export_csv(rows, path):
 
 
 # ---------------------------------------------------------------------------
-# GUI — colour tags
+# Design system  —  "Voucher Sync" Direction B (Claude Design handoff)
+#
+# A modernized, desktop-shaped restyle: neutral cool-gray surfaces with a blue
+# primary accent, and green reserved for "connected / success" status. Recreated
+# in Tkinter from the HTML/CSS prototype. Tkinter can't do rounded corners or
+# drop shadows, so cards use flat 1px borders; everything else (palette,
+# hierarchy, segmented controls, toggles, status pills, chips) is matched.
 # ---------------------------------------------------------------------------
-TAG_UPDATE = "tag_update"
-TAG_SKIP   = "tag_skip"
-TAG_FLAG   = "tag_flag"
-TAG_OCR    = "tag_ocr"      # UPDATE row whose voucher came from OCR, not QR
-
-ROW_COLOR = {
-    TAG_UPDATE: "#d4edda",   # soft green  — QR-confirmed update
-    TAG_OCR:    "#cce5ff",   # light blue  — OCR-derived update (review recommended)
-    TAG_SKIP:   "#f0f0f0",   # light grey  — no action needed
-    TAG_FLAG:   "#fff3cd",   # amber       — needs attention
+COL = {
+    "card_bg":      "#ffffff",
+    "card_border":  "#e3e7ee",
+    "header_bg":    "#fafbfd",
+    "subtle":       "#f5f7fa",   # inset field / action-bar background
+    "track":        "#eef1f5",   # segmented-control track
+    "divider":      "#eef1f5",
+    "primary":      "#2f6df0",   # primary action accent (blue)
+    "primary_press":"#2a61d6",
+    "text":         "#1b2530",
+    "text_med":     "#4a5563",
+    "text_soft":    "#647280",
+    "text_soft2":   "#6b7785",
+    "muted":        "#9aa3af",
+    "muted2":       "#aab2bf",
+    "green":        "#1f9d63",   # success / connected / progress
+    "green_press":  "#1b8a57",
+    "green_text":   "#16774a",
+    "green_bg":     "#e6f5ec",
+    "green_border": "#c3e8d4",
+    "skip_bg":      "#eaeef3",
+    "skip_fg":      "#5b6573",
+    "flag_bg":      "#fdebcf",
+    "flag_fg":      "#9a6712",
+    "flag_row":     "#fff8f0",   # amber-tinted flag row
+    "ocr_row":      "#cce5ff",   # OCR-derived update (review recommended)
+    "zebra0":       "#ffffff",
+    "zebra1":       "#fafbfd",
+    "toggle_off":   "#d4dae2",
 }
 
-ACTION_TAG = {UPDATE: TAG_UPDATE, SKIP: TAG_SKIP, FLAG: TAG_FLAG}
-# OCR rows use TAG_OCR; resolved per-row by _action_tag() rather than this map.
+# Resolved against installed families in _init_fonts(); the design asks for
+# Public Sans / JetBrains Mono, with the closest system fonts as fallbacks.
+F = {}
+
+
+def _init_fonts(root):
+    fams = set(tkfont.families())
+    ui   = "Public Sans"   if "Public Sans"   in fams else "Segoe UI"
+    mono = "JetBrains Mono" if "JetBrains Mono" in fams else "Consolas"
+    F.update({
+        "title":     (ui, 16, "bold"),
+        "subtitle":  (ui, 9),
+        "eyebrow":   (ui, 8, "bold"),
+        "label":     (ui, 9, "bold"),
+        "help":      (ui, 8),
+        "body":      (ui, 10),
+        "btn":       (ui, 10, "bold"),
+        "btn_sm":    (ui, 9, "bold"),
+        "seg":       (ui, 9),
+        "seg_sel":   (ui, 9, "bold"),
+        "chip":      (ui, 9, "bold"),
+        "pill_lbl":  (ui, 9, "bold"),
+        "status":    (ui, 9, "bold"),
+        "count":     (ui, 8),
+        "tree":      (ui, 10),
+        "tree_mono": (mono, 9),
+        "heading":   (ui, 8, "bold"),
+        "mono":      (mono, 9),
+        "mono_sm":   (mono, 8),
+        "log":       (mono, 9),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Custom widgets  —  Tkinter has no native toggle / segmented control, so the
+# design's pieces are drawn by hand.
+# ---------------------------------------------------------------------------
+class ToggleSwitch(tk.Canvas):
+    """A pill toggle bound to a BooleanVar: blue when on, gray when off."""
+
+    def __init__(self, parent, variable, command=None, bg=None):
+        super().__init__(parent, width=40, height=24,
+                         bg=bg or parent["bg"], highlightthickness=0, bd=0,
+                         cursor="hand2")
+        self._var = variable
+        self._cmd = command
+        self.bind("<Button-1>", self._toggle)
+        self._draw()
+
+    def _toggle(self, _evt=None):
+        self._var.set(not bool(self._var.get()))
+        self._draw()
+        if self._cmd:
+            self._cmd()
+
+    def refresh(self):
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        on  = bool(self._var.get())
+        col = COL["primary"] if on else COL["toggle_off"]
+        # rounded track (two end caps + center rect)
+        self.create_oval(1, 2, 21, 22, fill=col, outline="")
+        self.create_oval(19, 2, 39, 22, fill=col, outline="")
+        self.create_rectangle(11, 2, 29, 22, fill=col, outline="")
+        # knob
+        cx = 29 if on else 11
+        self.create_oval(cx - 9, 3, cx + 9, 21, fill="#ffffff", outline="")
+
+
+class SegmentedControl(tk.Frame):
+    """A track of selectable segments bound to a StringVar (iOS-style)."""
+
+    def __init__(self, parent, options, variable, command=None):
+        super().__init__(parent, bg=COL["track"], highlightthickness=1,
+                         highlightbackground=COL["card_border"], bd=0)
+        self._var = variable
+        self._cmd = command
+        self._labels = {}
+        for label, value in options:
+            lbl = tk.Label(self, text=label, bg=COL["track"], padx=12, pady=5,
+                           cursor="hand2")
+            lbl.pack(side="left", padx=2, pady=2)
+            lbl.bind("<Button-1>", lambda _e, v=value: self._select(v))
+            self._labels[value] = lbl
+        self.refresh()
+
+    def _select(self, value):
+        self._var.set(value)
+        self.refresh()
+        if self._cmd:
+            self._cmd()
+
+    def refresh(self):
+        cur = self._var.get()
+        for value, lbl in self._labels.items():
+            if value == cur:
+                lbl.configure(bg="#ffffff", fg=COL["text"], font=F["seg_sel"])
+            else:
+                lbl.configure(bg=COL["track"], fg=COL["text_soft2"],
+                              font=F["seg"])
+
+
+class FlatButton(tk.Button):
+    """A flat, fully color-controlled button with explicit enabled/disabled
+    palettes (ttk on Windows ignores most color options, so use classic tk)."""
+
+    def __init__(self, parent, text, command, fg, bg, active,
+                 disabled_fg, disabled_bg, font, border=None, padx=16):
+        super().__init__(
+            parent, text=text, command=command, font=font,
+            fg=fg, bg=bg, activeforeground=fg, activebackground=active,
+            relief="flat", bd=0, padx=padx, pady=8, cursor="hand2",
+            highlightthickness=(1 if border else 0),
+            highlightbackground=border or bg, takefocus=0,
+        )
+        self._enabled_palette  = (fg, bg, active)
+        self._disabled_palette = (disabled_fg, disabled_bg)
+
+    def set_enabled(self, on):
+        if on:
+            fg, bg, active = self._enabled_palette
+            self.configure(state="normal", fg=fg, bg=bg,
+                           activebackground=active, cursor="hand2")
+        else:
+            dfg, dbg = self._disabled_palette
+            self.configure(state="disabled", bg=dbg, disabledforeground=dfg,
+                           cursor="arrow")
+
+
+# ---------------------------------------------------------------------------
+# GUI — preview-queue row colours (zebra rows, amber flags, tinted updates)
+# ---------------------------------------------------------------------------
+TAG_UPDATE = "tag_update"
+TAG_OCR    = "tag_ocr"       # UPDATE row whose voucher came from OCR, not QR
+TAG_FLAG   = "tag_flag"
+TAG_ZEBRA0 = "tag_zebra0"    # even SKIP row
+TAG_ZEBRA1 = "tag_zebra1"    # odd SKIP row
+
+ROW_COLOR = {
+    TAG_UPDATE: COL["green_bg"],   # soft green — QR-confirmed update
+    TAG_OCR:    COL["ocr_row"],    # light blue — OCR-derived update (review)
+    TAG_FLAG:   COL["flag_row"],   # amber-tinted — needs attention
+    TAG_ZEBRA0: COL["zebra0"],     # zebra striping for no-action rows
+    TAG_ZEBRA1: COL["zebra1"],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -668,198 +840,377 @@ class VoucherSyncApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("iNaturalist Voucher Sync")
-        self.geometry("1120x820")
-        self.minsize(860, 620)
+        self.geometry("1220x900")
+        self.minsize(1000, 720)
+        self.configure(bg=COL["card_bg"])
+
+        _init_fonts(self)
+        self._init_style()
 
         self._rows   = []
         self._mq     = queue.Queue()
         self._worker = None
+        self._log_open = False
 
         self._build_ui()
         self._poll()
         self._load_env_token()
 
+    def _init_style(self):
+        """Theme ttk widgets (Treeview, Progressbar, Scrollbar) to the palette.
+        'clam' is used because it honors background/foreground colors that the
+        native Windows theme ignores."""
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure(
+            "Queue.Treeview",
+            background=COL["card_bg"], fieldbackground=COL["card_bg"],
+            foreground=COL["text"], font=F["tree"], rowheight=30,
+            borderwidth=0, relief="flat",
+        )
+        style.configure(
+            "Queue.Treeview.Heading",
+            background=COL["subtle"], foreground=COL["muted"],
+            font=F["heading"], relief="flat", borderwidth=0, padding=(10, 8),
+        )
+        style.map("Queue.Treeview.Heading",
+                  background=[("active", COL["track"])])
+
+        # Tk 8.6.9 regression: a ('!disabled', '!selected', ...) style-map entry
+        # forces every normal row to the default background, overriding per-row
+        # tag colours. Strip it so tag_configure backgrounds render. Harmless on
+        # versions that don't carry the bad entry.
+        def _fixed_map(option):
+            return [e for e in style.map("Queue.Treeview", query_opt=option)
+                    if e[:2] != ("!disabled", "!selected")]
+        style.map("Queue.Treeview",
+                  foreground=_fixed_map("foreground"),
+                  background=[("selected", "#dbe7ff")])
+
+        style.configure(
+            "Green.Horizontal.TProgressbar",
+            troughcolor=COL["card_border"], background=COL["green"],
+            bordercolor=COL["card_border"], lightcolor=COL["green"],
+            darkcolor=COL["green"], thickness=7,
+        )
+        style.configure("Vertical.TScrollbar", background=COL["track"],
+                        troughcolor=COL["card_bg"], bordercolor=COL["card_bg"],
+                        arrowcolor=COL["muted"])
+        style.configure("Horizontal.TScrollbar", background=COL["track"],
+                        troughcolor=COL["card_bg"], bordercolor=COL["card_bg"],
+                        arrowcolor=COL["muted"])
+
     # ----------------------------------------------------------------------- #
     # UI                                                                       #
     # ----------------------------------------------------------------------- #
     def _build_ui(self):
-        cfg = ttk.LabelFrame(self, text="Configuration", padding=10)
-        cfg.pack(fill="x", padx=12, pady=(10, 4))
-        self._build_config(cfg)
+        self._build_header()
 
-        btn = ttk.Frame(self, padding=(12, 0))
-        btn.pack(fill="x")
-        self._build_buttons(btn)
+        body = tk.Frame(self, bg=COL["card_bg"])
+        body.pack(fill="both", expand=True, padx=24, pady=(18, 22))
 
-        prog = ttk.Frame(self, padding=(12, 4))
-        prog.pack(fill="x")
-        self._prog_lbl = ttk.Label(prog, text="", width=24)
-        self._prog_lbl.pack(side="left")
-        self._prog_bar = ttk.Progressbar(prog, length=360, mode="determinate")
-        self._prog_bar.pack(side="left", padx=(6, 0))
+        self._build_config(body)
+        self._build_action_bar(body)
+        self._build_results(body)
+        self._build_log(body)
 
-        self._summary_var = tk.StringVar()
-        ttk.Label(self, textvariable=self._summary_var,
-                  font=("TkDefaultFont", 9, "bold"),
-                  foreground="#333").pack(anchor="w", padx=14, pady=(0, 4))
+    # ----- header band ----------------------------------------------------- #
+    def _build_header(self):
+        header = tk.Frame(self, bg=COL["header_bg"])
+        header.pack(fill="x")
+        inner = tk.Frame(header, bg=COL["header_bg"])
+        inner.pack(fill="x", padx=24, pady=16)
 
-        paned = ttk.PanedWindow(self, orient="vertical")
-        paned.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        left = tk.Frame(inner, bg=COL["header_bg"])
+        left.pack(side="left")
+        tk.Label(left, text="Voucher Sync", bg=COL["header_bg"],
+                 fg=COL["text"], font=F["title"]).pack(anchor="w")
+        tk.Label(left,
+                 text="Match specimen voucher labels in your photos to "
+                      "iNaturalist observations.",
+                 bg=COL["header_bg"], fg=COL["text_soft2"],
+                 font=F["subtitle"]).pack(anchor="w", pady=(2, 0))
 
-        tree_frame = ttk.LabelFrame(paned, text="Preview queue", padding=4)
-        paned.add(tree_frame, weight=3)
-        self._build_tree(tree_frame)
+        # Connection status pill — gray until a token verifies, then green.
+        self._conn_pill = tk.Frame(inner, highlightthickness=1)
+        self._conn_pill.pack(side="right")
+        self._conn_dot = tk.Canvas(self._conn_pill, width=10, height=10,
+                                   highlightthickness=0, bd=0)
+        self._conn_dot.pack(side="left", padx=(13, 7), pady=8)
+        self._conn_lbl = tk.Label(self._conn_pill, font=F["pill_lbl"])
+        self._conn_lbl.pack(side="left", padx=(0, 14), pady=7)
+        self._set_connected(None)
 
-        log_frame = ttk.LabelFrame(paned, text="Log", padding=4)
-        paned.add(log_frame, weight=1)
-        self._log = scrolledtext.ScrolledText(
-            log_frame, height=8, state="disabled",
-            font=("Consolas", 9), wrap="word",
+        tk.Frame(self, bg=COL["card_border"], height=1).pack(fill="x")
+
+    def _set_connected(self, login):
+        if login:
+            bg, fg, dot = COL["green_bg"], COL["green_text"], COL["green"]
+            text, border = f"Connected · {login}", COL["green_border"]
+            if hasattr(self, "_token_status"):
+                self._token_status.configure(text="✓ valid", fg=COL["green"])
+        else:
+            bg, fg, dot = COL["subtle"], COL["muted"], COL["muted"]
+            text, border = "Not connected", COL["card_border"]
+        self._conn_pill.configure(bg=bg, highlightbackground=border)
+        self._conn_dot.configure(bg=bg)
+        self._conn_dot.delete("all")
+        self._conn_dot.create_oval(1, 1, 9, 9, fill=dot, outline="")
+        self._conn_lbl.configure(bg=bg, fg=fg, text=text)
+
+    # ----- small shared builders ------------------------------------------- #
+    def _make_card(self, parent, bg=None):
+        """A flat bordered card; returns (outer, padded_inner)."""
+        bg = bg or COL["card_bg"]
+        outer = tk.Frame(parent, bg=bg, highlightthickness=1,
+                         highlightbackground=COL["card_border"], bd=0)
+        inner = tk.Frame(outer, bg=bg)
+        inner.pack(fill="both", expand=True, padx=16, pady=15)
+        return outer, inner
+
+    def _entry(self, parent, var, bg=None, mono=False, width=0, show=None):
+        bg = bg or COL["card_bg"]
+        return tk.Entry(
+            parent, textvariable=var, bd=0, relief="flat",
+            highlightthickness=1, highlightbackground=COL["card_border"],
+            highlightcolor=COL["primary"], bg=bg, fg=COL["text"],
+            insertbackground=COL["text"], disabledbackground=COL["subtle"],
+            disabledforeground=COL["muted"], readonlybackground=COL["subtle"],
+            font=F["mono"] if mono else F["body"],
+            width=width or 0, show=show,
         )
-        self._log.pack(fill="both", expand=True)
 
+    def _secondary_btn(self, parent, text, command, padx=14):
+        return FlatButton(
+            parent, text=text, command=command, font=F["btn_sm"],
+            fg=COL["text_med"], bg=COL["card_bg"], active=COL["track"],
+            disabled_fg=COL["muted2"], disabled_bg=COL["track"],
+            border=COL["card_border"], padx=padx)
+
+    # ----- configuration cards --------------------------------------------- #
     def _build_config(self, parent):
-        for col in (1, 3, 5):
-            parent.columnconfigure(col, weight=1)
+        grid = tk.Frame(parent, bg=COL["card_bg"])
+        grid.pack(fill="x")
+        grid.columnconfigure(0, weight=1, uniform="cards")
+        grid.columnconfigure(1, weight=1, uniform="cards")
 
-        # Token row
-        ttk.Label(parent, text="API Token:").grid(
-            row=0, column=0, sticky="e", padx=(0, 6), pady=4)
-        self._token_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self._token_var, show="*",
-                  width=56).grid(row=0, column=1, columnspan=4,
-                                 sticky="ew", pady=4)
-        ttk.Button(parent, text="Load from file",
-                   command=self._load_token_file).grid(
-            row=0, column=5, padx=(8, 0), pady=4, sticky="w")
+        conn_o, conn_i = self._make_card(grid)
+        conn_o.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self._build_connection_card(conn_i)
 
-        # Username / field id / regex row
-        ttk.Label(parent, text="Username:").grid(
-            row=1, column=0, sticky="e", padx=(0, 6), pady=4)
-        self._user_var = tk.StringVar(value=DEFAULT_USER)
-        ttk.Entry(parent, textvariable=self._user_var, width=20).grid(
-            row=1, column=1, sticky="w", pady=4)
+        match_o, match_i = self._make_card(grid)
+        match_o.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self._build_matching_card(match_i)
 
-        ttk.Label(parent, text="Field ID:").grid(
-            row=1, column=2, sticky="e", padx=(16, 6), pady=4)
-        self._field_id_var = tk.StringVar(value=str(DEFAULT_FIELD_ID))
-        ttk.Entry(parent, textvariable=self._field_id_var, width=8).grid(
-            row=1, column=3, sticky="w", pady=4)
+        ocr_o, ocr_i = self._make_card(grid, bg=COL["header_bg"])
+        ocr_o.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        self._build_ocr_card(ocr_i)
 
-        # Voucher format row — pick a preset or "Custom" to type a regex.
-        ttk.Label(parent, text="Voucher format:").grid(
-            row=2, column=0, sticky="e", padx=(0, 6), pady=4)
-        vf = ttk.Frame(parent)
-        vf.grid(row=2, column=1, columnspan=5, sticky="w", pady=4)
-
-        self._format_var = tk.StringVar(value=DEFAULT_VOUCHER_FORMAT)
-        for name, _pat in VOUCHER_FORMATS:
-            ttk.Radiobutton(vf, text=name, variable=self._format_var,
-                            value=name,
-                            command=self._on_format_change).pack(
-                side="left", padx=(0, 10))
-
-        self._regex_var = tk.StringVar(value=DEFAULT_VOUCHER_RE)
-        self._regex_entry = ttk.Entry(vf, textvariable=self._regex_var,
-                                      width=26)
-        self._regex_entry.pack(side="left", padx=(6, 0))
-
-        # Date row
-        ttk.Label(parent, text="Date filter:").grid(
-            row=3, column=0, sticky="e", padx=(0, 6), pady=4)
-        df = ttk.Frame(parent)
-        df.grid(row=3, column=1, columnspan=5, sticky="w", pady=4)
-
-        self._date_mode = tk.StringVar(value="single")
-        ttk.Radiobutton(df, text="Single date", variable=self._date_mode,
-                        value="single",
-                        command=self._toggle_dates).pack(side="left")
-        ttk.Radiobutton(df, text="Date range", variable=self._date_mode,
-                        value="range",
-                        command=self._toggle_dates).pack(
-            side="left", padx=(12, 0))
-
-        ttk.Label(df, text="   Date:").pack(side="left")
-        self._date_var = tk.StringVar()
-        self._date_entry = ttk.Entry(df, textvariable=self._date_var, width=12)
-        self._date_entry.pack(side="left", padx=(4, 0))
-
-        self._lbl_start = ttk.Label(df, text="   Start:")
-        self._lbl_start.pack(side="left")
-        self._date_start_var = tk.StringVar()
-        self._date_start_entry = ttk.Entry(
-            df, textvariable=self._date_start_var, width=12)
-        self._date_start_entry.pack(side="left", padx=(4, 0))
-
-        ttk.Label(df, text="   End:").pack(side="left")
-        self._date_end_var = tk.StringVar()
-        self._date_end_entry = ttk.Entry(
-            df, textvariable=self._date_end_var, width=12)
-        self._date_end_entry.pack(side="left", padx=(4, 0))
-
-        ttk.Label(df, text="  (DD/MM/YYYY)",
-                  foreground="#888").pack(side="left")
-
-        # Options row
-        self._overwrite_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(parent, text="Allow overwrite of existing values",
-                        variable=self._overwrite_var).grid(
-            row=4, column=1, columnspan=4, sticky="w", pady=(2, 4))
-
-        # OCR fallback row
-        ttk.Label(parent, text="OCR fallback:").grid(
-            row=5, column=0, sticky="e", padx=(0, 6), pady=4)
-        ocr_frame = ttk.Frame(parent)
-        ocr_frame.grid(row=5, column=1, columnspan=5, sticky="w", pady=4)
-
-        self._ocr_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ocr_frame,
-                        text="Enable (pytesseract)  —  used when QR fails",
-                        variable=self._ocr_var,
-                        command=self._toggle_ocr).pack(side="left")
-
-        ttk.Label(ocr_frame, text="    Tesseract path:").pack(side="left")
-        self._tess_var = tk.StringVar()
-        self._tess_entry = ttk.Entry(ocr_frame, textvariable=self._tess_var,
-                                     width=36, state="disabled")
-        self._tess_entry.pack(side="left", padx=(4, 0))
-        self._tess_browse_btn = ttk.Button(ocr_frame, text="Browse",
-                                           command=self._browse_tesseract,
-                                           state="disabled")
-        self._tess_browse_btn.pack(side="left", padx=(4, 0))
-
-        # Auto-populate the common Windows path if it exists.
+        # Auto-populate the common Windows Tesseract path if it exists.
         if os.path.isfile(_WIN_TESS_DEFAULT):
             self._tess_var.set(_WIN_TESS_DEFAULT)
 
-        ttk.Label(ocr_frame,
-                  text="  (leave blank to use PATH)",
-                  foreground="#888").pack(side="left")
-
         self._toggle_dates()
         self._on_format_change()
+        self._toggle_ocr()
+
+    def _eyebrow(self, parent, text, bg):
+        tk.Label(parent, text=text, bg=bg, fg=COL["muted"],
+                 font=F["eyebrow"]).pack(anchor="w", pady=(0, 13))
+
+    def _field_label(self, parent, text, bg, pady=(0, 5)):
+        tk.Label(parent, text=text, bg=bg, fg=COL["text_soft"],
+                 font=F["label"]).pack(anchor="w", pady=pady)
+
+    def _build_connection_card(self, c):
+        bg = COL["card_bg"]
+        self._eyebrow(c, "CONNECTION", bg)
+
+        # API token — inset field with a "✓ valid" status + Load from file.
+        self._field_label(c, "API token", bg)
+        tok_row = tk.Frame(c, bg=bg)
+        tok_row.pack(fill="x")
+        tok_field = tk.Frame(tok_row, bg=COL["subtle"], highlightthickness=1,
+                             highlightbackground=COL["card_border"])
+        tok_field.pack(side="left", fill="x", expand=True)
+        self._token_var = tk.StringVar()
+        tk.Entry(tok_field, textvariable=self._token_var, show="•", bd=0,
+                 relief="flat", bg=COL["subtle"], fg=COL["text"],
+                 font=F["mono"], insertbackground=COL["text"]).pack(
+            side="left", fill="x", expand=True, padx=(10, 6), pady=8)
+        self._token_status = tk.Label(tok_field, text="", bg=COL["subtle"],
+                                      fg=COL["green"], font=F["help"])
+        self._token_status.pack(side="left", padx=(0, 10))
+        self._secondary_btn(tok_row, "Load from file",
+                            self._load_token_file, padx=13).pack(
+            side="left", padx=(8, 0))
+
+        # Username + Field ID
+        uf = tk.Frame(c, bg=bg)
+        uf.pack(fill="x", pady=(14, 0))
+        uf.columnconfigure(0, weight=1)
+        ucol = tk.Frame(uf, bg=bg)
+        ucol.grid(row=0, column=0, sticky="ew")
+        self._field_label(ucol, "Username", bg)
+        self._user_var = tk.StringVar(value=DEFAULT_USER)
+        self._entry(ucol, self._user_var).pack(fill="x", ipady=5)
+
+        fcol = tk.Frame(uf, bg=bg)
+        fcol.grid(row=0, column=1, sticky="ew", padx=(12, 0))
+        self._field_label(fcol, "Field ID", bg)
+        self._field_id_var = tk.StringVar(value=str(DEFAULT_FIELD_ID))
+        self._entry(fcol, self._field_id_var, mono=True, width=8).pack(
+            fill="x", ipady=5)
+
+        tk.Label(c, text="Observation field that stores the voucher code.",
+                 bg=bg, fg=COL["muted"], font=F["help"]).pack(
+            anchor="w", pady=(7, 0))
+
+    def _build_matching_card(self, c):
+        bg = COL["card_bg"]
+        self._eyebrow(c, "VOUCHER MATCHING", bg)
+
+        # Code format — segmented control over the preset names.
+        self._field_label(c, "Code format", bg, pady=(0, 6))
+        self._format_var = tk.StringVar(value=DEFAULT_VOUCHER_FORMAT)
+        fmt_opts = [(name, name) for name, _pat in VOUCHER_FORMATS]
+        self._fmt_seg = SegmentedControl(c, fmt_opts, self._format_var,
+                                         command=self._on_format_change)
+        self._fmt_seg.pack(anchor="w")
+
+        pat = tk.Frame(c, bg=bg)
+        pat.pack(fill="x", pady=(9, 0))
+        tk.Label(pat, text="Pattern", bg=bg, fg=COL["muted"],
+                 font=F["help"]).pack(side="left", padx=(0, 8))
+        self._regex_var = tk.StringVar(value=DEFAULT_VOUCHER_RE)
+        self._regex_entry = tk.Entry(
+            pat, textvariable=self._regex_var, bd=0, relief="flat",
+            highlightthickness=1, highlightbackground=COL["divider"],
+            highlightcolor=COL["primary"], bg=COL["subtle"],
+            fg=COL["text_soft"], font=F["mono_sm"],
+            insertbackground=COL["text"], readonlybackground=COL["subtle"])
+        self._regex_entry.pack(side="left", fill="x", expand=True, ipady=4)
+
+        # Date filter — segmented Single day / Range + date input(s).
+        self._field_label(c, "Date filter", bg, pady=(16, 6))
+        drow = tk.Frame(c, bg=bg)
+        drow.pack(fill="x")
+        self._date_mode = tk.StringVar(value="single")
+        SegmentedControl(drow, [("Single day", "single"), ("Range", "range")],
+                         self._date_mode, command=self._toggle_dates).pack(
+            side="left")
+
+        today = datetime.date.today().strftime("%d/%m/%Y")
+        self._date_var = tk.StringVar(value=today)
+        self._date_entry = self._entry(drow, self._date_var, mono=True,
+                                       width=12)
+        self._date_entry.configure(justify="center")
+        self._date_start_var = tk.StringVar()
+        self._date_start_entry = self._entry(drow, self._date_start_var,
+                                             mono=True, width=11)
+        self._date_start_entry.configure(justify="center")
+        self._lbl_to = tk.Label(drow, text="to", bg=bg, fg=COL["muted"],
+                                font=F["help"])
+        self._date_end_var = tk.StringVar()
+        self._date_end_entry = self._entry(drow, self._date_end_var,
+                                           mono=True, width=11)
+        self._date_end_entry.configure(justify="center")
+        tk.Label(c, text="DD / MM / YYYY", bg=bg, fg=COL["muted"],
+                 font=F["help"]).pack(anchor="w", pady=(6, 0))
+
+        # Overwrite toggle
+        tk.Frame(c, bg=COL["divider"], height=1).pack(fill="x", pady=(16, 0))
+        ow = tk.Frame(c, bg=bg)
+        ow.pack(fill="x", pady=(13, 0))
+        self._overwrite_var = tk.BooleanVar(value=False)
+        ow_text = tk.Frame(ow, bg=bg)
+        ow_sub = tk.Label(ow_text, text="Off — only fills blank fields.",
+                          bg=bg, fg=COL["muted"], font=F["help"])
+
+        def _ow_cmd():
+            ow_sub.configure(
+                text="On — replaces conflicting values."
+                if self._overwrite_var.get()
+                else "Off — only fills blank fields.")
+
+        ToggleSwitch(ow, self._overwrite_var, command=_ow_cmd, bg=bg).pack(
+            side="left", padx=(0, 11))
+        ow_text.pack(side="left")
+        tk.Label(ow_text, text="Overwrite existing values", bg=bg,
+                 fg=COL["text"], font=F["label"]).pack(anchor="w")
+        ow_sub.pack(anchor="w")
+
+    def _build_ocr_card(self, c):
+        bg = COL["header_bg"]
+        row = tk.Frame(c, bg=bg)
+        row.pack(fill="x")
+
+        left = tk.Frame(row, bg=bg)
+        left.pack(side="left")
+        self._ocr_var = tk.BooleanVar(value=False)
+        self._ocr_toggle = ToggleSwitch(left, self._ocr_var,
+                                        command=self._toggle_ocr, bg=bg)
+        self._ocr_toggle.pack(side="left", padx=(0, 11))
+        ltxt = tk.Frame(left, bg=bg)
+        ltxt.pack(side="left")
+        tk.Label(ltxt, text="OCR fallback", bg=bg, fg=COL["text"],
+                 font=F["label"]).pack(anchor="w")
+        tk.Label(ltxt, text="Reads text when QR scan fails · pytesseract",
+                 bg=bg, fg=COL["muted"], font=F["help"]).pack(anchor="w")
+
+        tk.Frame(row, bg=COL["card_border"], width=1).pack(
+            side="left", fill="y", padx=20)
+
+        right = tk.Frame(row, bg=bg)
+        right.pack(side="left", fill="x", expand=True)
+        tk.Label(right, text="TESSERACT PATH", bg=bg, fg=COL["muted"],
+                 font=F["eyebrow"]).pack(anchor="w", pady=(0, 5))
+        prow = tk.Frame(right, bg=bg)
+        prow.pack(fill="x")
+        self._tess_var = tk.StringVar()
+        self._tess_entry = tk.Entry(
+            prow, textvariable=self._tess_var, bd=0, relief="flat",
+            highlightthickness=1, highlightbackground=COL["card_border"],
+            highlightcolor=COL["primary"], bg=COL["card_bg"],
+            fg=COL["text_soft"], font=F["mono_sm"],
+            insertbackground=COL["text"], disabledbackground=COL["subtle"],
+            disabledforeground=COL["muted"])
+        self._tess_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self._tess_browse_btn = self._secondary_btn(
+            prow, "Browse…", self._browse_tesseract, padx=14)
+        self._tess_browse_btn.pack(side="left", padx=(8, 0))
 
     def _on_format_change(self):
         """Apply the selected voucher-format preset, or unlock the regex box
         for the Custom option."""
         pattern = dict(VOUCHER_FORMATS).get(self._format_var.get())
         if pattern is None:                      # Custom
-            self._regex_entry.configure(state="normal")
+            self._regex_entry.configure(state="normal", fg=COL["text"])
         else:
             self._regex_var.set(pattern)
-            self._regex_entry.configure(state="readonly")
+            self._regex_entry.configure(state="readonly", fg=COL["text_soft"])
 
     def _toggle_dates(self):
+        """Single-day shows one date box; Range swaps in start/to/end."""
         single = self._date_mode.get() == "single"
-        self._date_entry.configure(state="normal" if single else "disabled")
-        rs = "disabled" if single else "normal"
-        self._date_start_entry.configure(state=rs)
-        self._date_end_entry.configure(state=rs)
+        for w in (self._date_entry, self._date_start_entry,
+                  self._lbl_to, self._date_end_entry):
+            w.pack_forget()
+        if single:
+            self._date_entry.pack(side="left", padx=(10, 0), ipady=4)
+        else:
+            self._date_start_entry.pack(side="left", padx=(10, 0), ipady=4)
+            self._lbl_to.pack(side="left", padx=7)
+            self._date_end_entry.pack(side="left", ipady=4)
 
     def _toggle_ocr(self):
-        state = "normal" if self._ocr_var.get() else "disabled"
-        self._tess_entry.configure(state=state)
-        self._tess_browse_btn.configure(state=state)
+        on = self._ocr_var.get()
+        self._tess_entry.configure(state="normal" if on else "disabled")
+        self._tess_browse_btn.set_enabled(on)
 
     def _browse_tesseract(self):
         path = filedialog.askopenfilename(
@@ -869,41 +1220,111 @@ class VoucherSyncApp(tk.Tk):
         if path:
             self._tess_var.set(path)
 
-    def _build_buttons(self, parent):
-        self._btn_preview = ttk.Button(parent, text="Preview", width=16,
-                                       command=self._start_preview)
-        self._btn_preview.pack(side="left", padx=(0, 8), pady=6)
+    # ----- action bar ------------------------------------------------------ #
+    def _build_action_bar(self, parent):
+        bar = tk.Frame(parent, bg=COL["subtle"], highlightthickness=1,
+                       highlightbackground=COL["divider"])
+        bar.pack(fill="x", pady=(18, 0))
+        inner = tk.Frame(bar, bg=COL["subtle"])
+        inner.pack(fill="x", padx=16, pady=12)
 
-        self._btn_apply = ttk.Button(parent, text="Apply Updates", width=16,
-                                     command=self._start_apply,
-                                     state="disabled")
-        self._btn_apply.pack(side="left", padx=(0, 8), pady=6)
+        self._btn_preview = FlatButton(
+            inner, text="Preview run", command=self._start_preview,
+            fg="#ffffff", bg=COL["primary"], active=COL["primary_press"],
+            disabled_fg="#ffffff", disabled_bg=COL["muted2"],
+            font=F["btn"], padx=22)
+        self._btn_preview.pack(side="left")
 
-        ttk.Button(parent, text="Export CSV", width=12,
-                   command=self._export_csv).pack(
-            side="left", padx=(0, 8), pady=6)
+        # Apply turns green when there are updates to commit (success accent).
+        self._btn_apply = FlatButton(
+            inner, text="Apply updates", command=self._start_apply,
+            fg="#ffffff", bg=COL["green"], active=COL["green_press"],
+            disabled_fg=COL["muted2"], disabled_bg=COL["track"],
+            font=F["btn"], padx=18)
+        self._btn_apply.set_enabled(False)
+        self._btn_apply.pack(side="left", padx=(10, 0))
 
-        ttk.Button(parent, text="Clear", width=8,
-                   command=self._clear).pack(side="left", pady=6)
+        self._secondary_btn(inner, "Export CSV", self._export_csv,
+                            padx=16).pack(side="left", padx=(10, 0))
+
+        FlatButton(
+            inner, text="Clear", command=self._clear,
+            fg=COL["muted"], bg=COL["subtle"], active=COL["track"],
+            disabled_fg=COL["muted2"], disabled_bg=COL["subtle"],
+            font=F["btn"], padx=14).pack(side="left", padx=(6, 0))
+
+        status = tk.Frame(inner, bg=COL["subtle"])
+        status.pack(side="right")
+        self._status_lbl = tk.Label(status, text="Ready", bg=COL["subtle"],
+                                    fg=COL["muted"], font=F["status"],
+                                    anchor="e")
+        self._status_lbl.pack(fill="x")
+        self._prog_bar = ttk.Progressbar(
+            status, length=190, mode="determinate",
+            style="Green.Horizontal.TProgressbar")
+        self._prog_bar.pack(fill="x", pady=(5, 0))
+        self._count_lbl = tk.Label(status, text="", bg=COL["subtle"],
+                                   fg=COL["muted"], font=F["count"],
+                                   anchor="e")
+        self._count_lbl.pack(fill="x", pady=(4, 0))
+
+    # ----- results: chips + preview queue ---------------------------------- #
+    def _build_results(self, parent):
+        head = tk.Frame(parent, bg=COL["card_bg"])
+        head.pack(fill="x", pady=(22, 11))
+        tk.Label(head, text="Preview queue", bg=COL["card_bg"],
+                 fg=COL["text"], font=(F["title"][0], 11, "bold")).pack(
+            side="left", padx=(0, 10))
+        self._chip_update = self._make_chip(head)
+        self._chip_skip = self._make_chip(head)
+        self._chip_flag = self._make_chip(head)
+        tk.Label(head, text="Double-click any row to open in browser →",
+                 bg=COL["card_bg"], fg=COL["muted"], font=F["help"]).pack(
+            side="right")
+        self._reset_chips()
+
+        tree_card = tk.Frame(parent, bg=COL["card_bg"], highlightthickness=1,
+                             highlightbackground=COL["card_border"])
+        tree_card.pack(fill="both", expand=True)
+        self._build_tree(tree_card)
+
+    def _make_chip(self, parent):
+        lbl = tk.Label(parent, font=F["chip"], padx=10, pady=3)
+        lbl.pack(side="left", padx=(0, 6))
+        return lbl
+
+    def _style_chip(self, lbl, count, word, on_bg, on_fg):
+        if count:
+            lbl.configure(text=f"{count} {word}", bg=on_bg, fg=on_fg)
+        else:
+            lbl.configure(text=f"0 {word}", bg=COL["subtle"], fg=COL["muted"])
+
+    def _reset_chips(self):
+        self._style_chip(self._chip_update, 0, "update",
+                         COL["green_bg"], COL["green_text"])
+        self._style_chip(self._chip_skip, 0, "skip",
+                         COL["skip_bg"], COL["skip_fg"])
+        self._style_chip(self._chip_flag, 0, "flag",
+                         COL["flag_bg"], COL["flag_fg"])
 
     def _build_tree(self, parent):
         cols = ("obs_id", "taxon", "uploaded", "detected",
                 "current", "action", "reason")
         self._tree = ttk.Treeview(parent, columns=cols, show="headings",
-                                  selectmode="browse")
+                                  selectmode="browse", style="Queue.Treeview")
         headings = {
-            "obs_id":   "Obs ID",
-            "taxon":    "Taxon",
-            "uploaded": "Uploaded",
-            "detected": "Detected Voucher",
-            "current":  "Current Value",
-            "action":   "Action",
-            "reason":   "Reason",
+            "obs_id":   "OBS ID",
+            "taxon":    "TAXON",
+            "uploaded": "UPLOADED",
+            "detected": "DETECTED",
+            "current":  "CURRENT",
+            "action":   "ACTION",
+            "reason":   "REASON",
         }
         widths = {
-            "obs_id": 90, "taxon": 250, "uploaded": 90,
-            "detected": 120, "current": 110,
-            "action": 72, "reason": 190,
+            "obs_id": 92, "taxon": 280, "uploaded": 90,
+            "detected": 108, "current": 108,
+            "action": 84, "reason": 150,
         }
         for col in cols:
             self._tree.heading(
@@ -912,33 +1333,14 @@ class VoucherSyncApp(tk.Tk):
             self._tree.column(col, width=widths[col], minwidth=50,
                               stretch=(col == "taxon"))
 
-        # Tk 8.6.9 regression: the Treeview style map contains a
-        # ('!disabled', '!selected', ...) entry that forces every normal row
-        # to the default background, overriding per-row tag colours. Strip it
-        # so tag_configure backgrounds render. Fixed upstream in Tk 8.6.10;
-        # this filter is harmless on versions that don't have the bad entry.
-        style = ttk.Style()
-
-        def _fixed_map(option):
-            return [e for e in style.map("Treeview", query_opt=option)
-                    if e[:2] != ("!disabled", "!selected")]
-
-        style.map("Treeview",
-                  foreground=_fixed_map("foreground"),
-                  background=_fixed_map("background"))
-
         for tag, bg in ROW_COLOR.items():
             self._tree.tag_configure(tag, background=bg)
 
         vsb = ttk.Scrollbar(parent, orient="vertical",
                             command=self._tree.yview)
-        hsb = ttk.Scrollbar(parent, orient="horizontal",
-                            command=self._tree.xview)
-        self._tree.configure(yscrollcommand=vsb.set,
-                             xscrollcommand=hsb.set)
+        self._tree.configure(yscrollcommand=vsb.set)
         self._tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
         parent.rowconfigure(0, weight=1)
         parent.columnconfigure(0, weight=1)
 
@@ -947,12 +1349,60 @@ class VoucherSyncApp(tk.Tk):
         self._sort_reverse = False
         self._sort_col     = None
 
+    # ----- collapsible run log --------------------------------------------- #
+    def _build_log(self, parent):
+        card = tk.Frame(parent, bg=COL["card_bg"], highlightthickness=1,
+                        highlightbackground=COL["card_border"])
+        card.pack(fill="x", pady=(16, 0))
+
+        header = tk.Frame(card, bg=COL["header_bg"], cursor="hand2")
+        header.pack(fill="x")
+        self._log_arrow = tk.Label(header, text="▸", bg=COL["header_bg"],
+                                   fg=COL["muted"], font=F["help"], width=2)
+        self._log_arrow.pack(side="left", padx=(12, 4), pady=11)
+        tk.Label(header, text="Run log", bg=COL["header_bg"],
+                 fg=COL["text_med"], font=F["label"]).pack(side="left")
+        self._log_lines = tk.Label(header, text="0 lines", bg=COL["header_bg"],
+                                   fg=COL["muted"], font=F["help"])
+        self._log_lines.pack(side="left", padx=(9, 0))
+        self._log_hint = tk.Label(header, text="click to expand",
+                                  bg=COL["header_bg"], fg=COL["muted2"],
+                                  font=F["help"])
+        self._log_hint.pack(side="right", padx=(0, 14))
+        header.bind("<Button-1>", self._toggle_log)
+        for child in header.winfo_children():
+            child.bind("<Button-1>", self._toggle_log)
+
+        self._log_body = tk.Frame(card, bg=COL["subtle"])
+        tk.Frame(self._log_body, bg=COL["divider"], height=1).pack(fill="x")
+        self._log = scrolledtext.ScrolledText(
+            self._log_body, height=9, state="disabled", font=F["log"],
+            wrap="word", bd=0, relief="flat", bg=COL["subtle"],
+            fg=COL["text_soft"], padx=12, pady=10, highlightthickness=0)
+        self._log.pack(fill="both", expand=True)
+        # Collapsed by default — body is packed only when toggled open.
+
+    def _toggle_log(self, _evt=None):
+        self._log_open = not self._log_open
+        if self._log_open:
+            self._log_body.pack(fill="x")
+            self._log_arrow.configure(text="▾")
+            self._log_hint.configure(text="click to collapse")
+        else:
+            self._log_body.pack_forget()
+            self._log_arrow.configure(text="▸")
+            self._log_hint.configure(text="click to expand")
+
     @staticmethod
-    def _action_tag(row):
-        """Return the colour tag for a row, distinguishing OCR updates."""
-        if row["action"] == UPDATE and "ocr" in row.get("reason", ""):
-            return TAG_OCR
-        return ACTION_TAG.get(row["action"], TAG_SKIP)
+    def _action_tag(row, index=0):
+        """Return the colour tag for a row: amber for flags, green/blue for
+        updates (QR vs OCR), and zebra striping for no-action rows."""
+        action = row["action"]
+        if action == FLAG:
+            return TAG_FLAG
+        if action == UPDATE:
+            return TAG_OCR if "ocr" in row.get("reason", "") else TAG_UPDATE
+        return TAG_ZEBRA1 if index % 2 else TAG_ZEBRA0
 
     # ----------------------------------------------------------------------- #
     # Helpers                                                                  #
@@ -1043,13 +1493,21 @@ class VoucherSyncApp(tk.Tk):
         self._log.insert("end", text + "\n")
         self._log.see("end")
         self._log.configure(state="disabled")
+        self._update_log_count()
 
     def _log_clear(self):
         self._log.configure(state="normal")
         self._log.delete("1.0", "end")
         self._log.configure(state="disabled")
+        self._update_log_count()
+
+    def _update_log_count(self):
+        # Text widgets always carry a trailing empty line; subtract it.
+        n = max(0, int(self._log.index("end-1c").split(".")[0]) - 1)
+        self._log_lines.configure(text=f"{n} line{'' if n == 1 else 's'}")
 
     def _tree_insert(self, row):
+        index = len(self._tree.get_children(""))
         self._tree.insert(
             "", "end",
             iid=str(row["observation_id"]),
@@ -1057,27 +1515,28 @@ class VoucherSyncApp(tk.Tk):
                 row["observation_id"],
                 row["taxon"],
                 row["upload_date"],
-                row["detected_voucher"] or "",
-                row["current_value"] or "",
+                row["detected_voucher"] or "—",
+                row["current_value"] or "—",
                 row["action"].upper(),
                 row["reason"],
             ),
-            tags=(self._action_tag(row),),
+            tags=(self._action_tag(row, index),),
         )
 
     def _tree_refresh_row(self, row):
         iid = str(row["observation_id"])
         if not self._tree.exists(iid):
             return
+        index = self._tree.index(iid)
         self._tree.item(
             iid,
-            tags=(self._action_tag(row),),
+            tags=(self._action_tag(row, index),),
             values=(
                 row["observation_id"],
                 row["taxon"],
                 row["upload_date"],
-                row["detected_voucher"] or "",
-                row["current_value"] or "",
+                row["detected_voucher"] or "—",
+                row["current_value"] or "—",
                 row["action"].upper(),
                 row["reason"],
             ),
@@ -1099,30 +1558,23 @@ class VoucherSyncApp(tk.Tk):
             webbrowser.open(f"{WEB}/observations/{sel}")
 
     def _set_busy(self, busy):
-        state = "disabled" if busy else "normal"
-        self._btn_preview.configure(state=state)
+        self._btn_preview.set_enabled(not busy)
         if busy:
-            self._btn_apply.configure(state="disabled")
+            self._btn_apply.set_enabled(False)
         else:
             n_update = sum(1 for r in self._rows if r["action"] == UPDATE)
-            self._btn_apply.configure(
-                state="normal" if n_update else "disabled")
+            self._btn_apply.set_enabled(bool(n_update))
 
     def _update_summary(self):
-        counts  = {UPDATE: 0, SKIP: 0, FLAG: 0}
-        ocr_count = 0
+        counts = {UPDATE: 0, SKIP: 0, FLAG: 0}
         for r in self._rows:
             counts[r["action"]] += 1
-            if r["action"] == UPDATE and "ocr" in r.get("reason", ""):
-                ocr_count += 1
-        ocr_note = f" ({ocr_count} via OCR)" if ocr_count else ""
-        self._summary_var.set(
-            f"  {counts[UPDATE]} update{ocr_note}   "
-            f"{counts[SKIP]} skip   "
-            f"{counts[FLAG]} flag   "
-            f"({len(self._rows)} total)    "
-            "Double-click a row to open in browser."
-        )
+        self._style_chip(self._chip_update, counts[UPDATE], "update",
+                         COL["green_bg"], COL["green_text"])
+        self._style_chip(self._chip_skip, counts[SKIP], "skip",
+                         COL["skip_bg"], COL["skip_fg"])
+        self._style_chip(self._chip_flag, counts[FLAG], "flag",
+                         COL["flag_bg"], COL["flag_fg"])
 
     # ----------------------------------------------------------------------- #
     # Queue polling                                                             #
@@ -1134,23 +1586,29 @@ class VoucherSyncApp(tk.Tk):
                 kind = msg["kind"]
                 if kind == "log":
                     self._log_write(msg["text"])
+                elif kind == "connected":
+                    self._set_connected(msg["login"])
                 elif kind == "progress":
                     self._prog_bar.configure(
                         mode="determinate",
                         maximum=msg["total"],
                         value=msg["value"],
                     )
-                    self._prog_lbl.configure(
-                        text=f"{msg['value']}/{msg['total']}")
+                    self._status_lbl.configure(text="Scanning…",
+                                               fg=COL["text_med"])
+                    self._count_lbl.configure(
+                        text=f"{msg['value']} of {msg['total']} "
+                             "observations scanned")
                 elif kind == "spin_start":
                     self._prog_bar.configure(mode="indeterminate")
                     self._prog_bar.start(12)
-                    self._prog_lbl.configure(text=msg["text"])
+                    self._status_lbl.configure(text=msg["text"],
+                                               fg=COL["text_med"])
+                    self._count_lbl.configure(text="")
                 elif kind == "spin_stop":
                     self._prog_bar.stop()
                     self._prog_bar.configure(
                         mode="determinate", maximum=100, value=0)
-                    self._prog_lbl.configure(text=msg.get("text", ""))
                 elif kind == "row":
                     self._tree_insert(msg["row"])
                 elif kind == "row_refresh":
@@ -1165,7 +1623,8 @@ class VoucherSyncApp(tk.Tk):
                     self._prog_bar.stop()
                     self._prog_bar.configure(
                         mode="determinate", maximum=100, value=0)
-                    self._prog_lbl.configure(text="")
+                    self._status_lbl.configure(text="Error", fg=COL["flag_fg"])
+                    self._count_lbl.configure(text="")
         except queue.Empty:
             pass
         self.after(80, self._poll)
@@ -1208,6 +1667,7 @@ class VoucherSyncApp(tk.Tk):
                                f"Get a fresh one at:\n{WEB}/users/api_token"})
                 return
             q.put({"kind": "log", "text": f"Authenticated as {login}"})
+            q.put({"kind": "connected", "login": login})
             if use_ocr:
                 q.put({"kind": "log",
                        "text": "OCR fallback enabled (pytesseract)."})
@@ -1297,7 +1757,13 @@ class VoucherSyncApp(tk.Tk):
             f"{counts[SKIP]} skip, "
             f"{counts[FLAG]} flag."
         )
-        self._prog_lbl.configure(text="Done")
+        n = len(rows)
+        self._status_lbl.configure(text="✓ Preview complete",
+                                   fg=COL["green_text"])
+        self._prog_bar.configure(mode="determinate", maximum=max(n, 1),
+                                 value=n)
+        self._count_lbl.configure(
+            text=f"{n} of {n} observations scanned")
         self._set_busy(False)
 
     # ----------------------------------------------------------------------- #
@@ -1367,7 +1833,12 @@ class VoucherSyncApp(tk.Tk):
                "applied": applied, "failed": failed})
 
     def _on_apply_done(self, applied, failed):
-        self._prog_lbl.configure(text="Done")
+        self._status_lbl.configure(
+            text="✓ Apply complete" if not failed else "Apply finished",
+            fg=COL["green_text"] if not failed else COL["flag_fg"])
+        self._count_lbl.configure(
+            text=f"{applied} written"
+                 + (f", {failed} failed" if failed else ""))
         self._log_write(
             f"\nApply complete — {applied} written, {failed} failed.")
         self._update_summary()
@@ -1397,11 +1868,12 @@ class VoucherSyncApp(tk.Tk):
             self._tree.delete(item)
         self._rows = []
         self._log_clear()
-        self._summary_var.set("")
-        self._btn_apply.configure(state="disabled")
+        self._reset_chips()
+        self._btn_apply.set_enabled(False)
         self._prog_bar.stop()
         self._prog_bar.configure(mode="determinate", maximum=100, value=0)
-        self._prog_lbl.configure(text="")
+        self._status_lbl.configure(text="Ready", fg=COL["muted"])
+        self._count_lbl.configure(text="")
 
 
 # ---------------------------------------------------------------------------
