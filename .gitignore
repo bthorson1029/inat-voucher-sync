@@ -1,0 +1,24 @@
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Secrets / local config
+*.token
+*token*.txt
+.env
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
