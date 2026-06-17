@@ -2020,6 +2020,134 @@ class VoucherSyncApp(tk.Tk):
         self.after(80, self._poll)
 
     # ----------------------------------------------------------------------- #
+    # OCR engine availability / one-click install                             #
+    # ----------------------------------------------------------------------- #
+    def _prompt_missing_ocr(self, engine, message):
+        """Ask what to do when the OCR engine isn't available.
+
+        Returns "install", "qr" (scan QR-only this run), or "cancel".
+        The bundled engine can be pip-installed in-app; Tesseract needs a
+        system install, so there we just offer QR-only or cancel.
+        """
+        import importlib.util
+        can_install = (engine == OCR_RAPIDOCR
+                       and importlib.util.find_spec("pip") is not None)
+        if not can_install:
+            if messagebox.askyesno(
+                    "OCR engine unavailable",
+                    message + "\n\nScan QR codes only for this run?"):
+                return "qr"
+            return "cancel"
+
+        bg = COL["card_bg"]
+        dlg = tk.Toplevel(self)
+        dlg.title("OCR engine not installed")
+        dlg.configure(bg=bg)
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        wrap = tk.Frame(dlg, bg=bg)
+        wrap.pack(fill="both", expand=True, padx=22, pady=20)
+        tk.Label(wrap, text="Built-in OCR isn't installed yet", bg=bg,
+                 fg=COL["text"], font=(F["title"][0], 12, "bold")).pack(
+            anchor="w")
+        tk.Label(wrap, text="The OCR fallback needs a one-time download "
+                            "(~tens of MB). I can install it for you now, or "
+                            "you can scan QR codes only for this run.",
+                 bg=bg, fg=COL["text_soft"], font=F["body"], justify="left",
+                 wraplength=380).pack(anchor="w", pady=(8, 16))
+        btns = tk.Frame(wrap, bg=bg)
+        btns.pack(fill="x")
+
+        choice = {"value": "cancel"}
+
+        def pick(value):
+            choice["value"] = value
+            dlg.destroy()
+
+        FlatButton(btns, text="Install now", command=lambda: pick("install"),
+                   fg="#ffffff", bg=COL["primary"], active=COL["primary_press"],
+                   disabled_fg="#ffffff", disabled_bg=COL["muted2"],
+                   font=F["btn"], padx=18).pack(side="left")
+        self._secondary_btn(btns, "Scan QR only",
+                            lambda: pick("qr")).pack(side="left", padx=(10, 0))
+        FlatButton(btns, text="Cancel", command=lambda: pick("cancel"),
+                   fg=COL["muted"], bg=bg, active=COL["track"],
+                   disabled_fg=COL["muted2"], disabled_bg=bg,
+                   font=F["btn"], padx=14).pack(side="right")
+
+        self._center_over_parent(dlg)
+        dlg.grab_set()
+        self.wait_window(dlg)
+        return choice["value"]
+
+    def _install_ocr_engine_blocking(self):
+        """Pip-install the bundled OCR engine into this interpreter, showing a
+        modal progress dialog. Returns True on success.
+
+        Using `sys.executable -m pip` guarantees the package lands in the same
+        environment that's running the app — the user never has to find the
+        right venv or open a terminal.
+        """
+        import importlib
+
+        bg = COL["card_bg"]
+        dlg = tk.Toplevel(self)
+        dlg.title("Installing OCR engine")
+        dlg.configure(bg=bg)
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        wrap = tk.Frame(dlg, bg=bg)
+        wrap.pack(fill="both", expand=True, padx=22, pady=20)
+        tk.Label(wrap, text="Installing the built-in OCR engine…", bg=bg,
+                 fg=COL["text"], font=F["label"]).pack(anchor="w")
+        tk.Label(wrap, text="Downloading rapidocr-onnxruntime (one time). "
+                            "This can take a minute.",
+                 bg=bg, fg=COL["muted"], font=F["help"], justify="left",
+                 wraplength=360).pack(anchor="w", pady=(6, 12))
+        bar = ttk.Progressbar(wrap, length=340, mode="indeterminate",
+                              style="Green.Horizontal.TProgressbar")
+        bar.pack(fill="x")
+        bar.start(12)
+
+        result = {"ok": False, "out": ""}
+
+        def worker():
+            import subprocess
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "pip", "install",
+                     "rapidocr-onnxruntime"],
+                    capture_output=True, text=True)
+                result["ok"] = proc.returncode == 0
+                result["out"] = (proc.stdout or "") + (proc.stderr or "")
+            except Exception as exc:
+                result["ok"], result["out"] = False, str(exc)
+            finally:
+                self.after(0, dlg.destroy)
+
+        self._center_over_parent(dlg)
+        dlg.grab_set()
+        threading.Thread(target=worker, daemon=True).start()
+        self.wait_window(dlg)
+
+        importlib.invalidate_caches()   # so the fresh install is importable
+        if not result["ok"]:
+            tail = (result["out"].strip().splitlines() or ["(no output)"])[-1]
+            messagebox.showerror(
+                "Install failed",
+                "Couldn't install the OCR engine automatically.\n\n"
+                f"{tail}\n\nYou can install it yourself with:\n"
+                "    pip install rapidocr-onnxruntime")
+        return result["ok"]
+
+    def _center_over_parent(self, dlg):
+        dlg.update_idletasks()
+        px, py = self.winfo_rootx(), self.winfo_rooty()
+        pw, ph = self.winfo_width(), self.winfo_height()
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        dlg.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 3}")
+
+    # ----------------------------------------------------------------------- #
     # Preview                                                                  #
     # ----------------------------------------------------------------------- #
     def _start_preview(self):
@@ -2031,19 +2159,32 @@ class VoucherSyncApp(tk.Tk):
         tess_cmd     = (self._tess_var.get().strip()
                         if use_ocr and ocr_engine == OCR_TESSERACT else None)
 
-        # Pre-flight: if OCR is on but its engine isn't available, say so once
-        # (with install guidance) and offer to scan QR-only, instead of
-        # flagging every QR failure with a cryptic "engine not installed".
+        # Pre-flight: if OCR is on but its engine isn't available, handle it
+        # once up front — offer a one-click install (bundled engine) or a
+        # QR-only run — instead of flagging every QR failure with a cryptic
+        # "engine not installed".
         ocr_downgraded = False
         if use_ocr:
             ok, msg = ocr_engine_available(ocr_engine, tess_cmd)
             if not ok:
-                if not messagebox.askyesno(
-                        "OCR engine unavailable",
-                        msg + "\n\nScan QR codes only for this run?"):
+                choice = self._prompt_missing_ocr(ocr_engine, msg)
+                if choice == "cancel":
                     return
-                use_ocr = False
-                ocr_downgraded = True
+                if choice == "install":
+                    installed = (self._install_ocr_engine_blocking()
+                                 and ocr_engine_available(ocr_engine,
+                                                          tess_cmd)[0])
+                    if not installed:
+                        if not messagebox.askyesno(
+                                "OCR still unavailable",
+                                "The OCR engine isn't ready. Scan QR codes "
+                                "only for this run?"):
+                            return
+                        use_ocr = False
+                        ocr_downgraded = True
+                else:  # "qr"
+                    use_ocr = False
+                    ocr_downgraded = True
 
         self._clear()
         self._cancel.clear()

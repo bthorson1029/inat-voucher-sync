@@ -50,7 +50,9 @@ Nothing is written to iNaturalist until you click **Apply updates** and confirm.
   ```
 
 - **OCR fallback (recommended, on by default):** the bundled `RapidOCR`
-  engine — pip-installable, no separate program to download:
+  engine — pip-installable, no separate program to download. The first time
+  you run a preview with OCR on, the app offers to **install it for you**
+  (into its own Python environment). To install it yourself instead:
 
   ```bash
   pip install rapidocr-onnxruntime
