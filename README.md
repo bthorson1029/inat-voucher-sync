@@ -92,18 +92,23 @@ python inat_voucher_sync.py
 
 Then in the window:
 
-1. **Paste your API token.** Get one at
-   https://www.inaturalist.org/users/api_token. The token can also be loaded
-   from a file or from the `INAT_API_TOKEN` environment variable. Once it
-   verifies, the status pill in the top-right turns green and shows your login.
+1. **Paste your API token.** Use the **Get a token ↗** link next to the field,
+   or go to https://www.inaturalist.org/users/api_token. The token can also be
+   supplied via the `INAT_API_TOKEN` environment variable. You must be signed
+   in to iNaturalist to see your token, and tokens expire after about 24 hours.
+   Once it verifies, the status pill in the top-right turns green and shows
+   your login.
 2. Enter your **username**, then choose the **observation field** to write to:
    start typing its name in the **Observation field** box and pick from the
    live suggestions — matching iNaturalist fields appear as you type, so you
    don't need to know the numeric ID.
-3. Pick the **code format** that matches your label (see below), and optionally
-   set a **date filter** (single day or range) or flip the **Overwrite existing
-   values** toggle. The **OCR fallback** is on by default; you can turn it off
-   or switch its **Engine** (built-in vs. Tesseract) in the OCR section.
+3. Pick the **code format** that matches your label (see below) — a live hint
+   under the **Pattern** field shows example codes for the selected format.
+   Optionally set a **date filter** (single day or range; click the 📅 button
+   to pick dates from a pop-up calendar, or type them as `DD/MM/YYYY`) or flip
+   the **Overwrite existing values** toggle. The **OCR fallback** is on by
+   default; you can turn it off or switch its **Engine** (built-in vs.
+   Tesseract) in the OCR section.
 4. Click **Preview run** to build the queue — hit **Stop** to abort a scan in
    progress — then review the color-coded results and **Apply updates**.
    **Export CSV** saves the queue, and the collapsible **Run log** at the bottom
@@ -172,8 +177,9 @@ SmartScreen may warn on first run.
 
 ## Notes
 
-- The tool reads tokens from input, a file, or `INAT_API_TOKEN` — **no
-  credentials are stored in the source.** Don't commit your token.
+- The tool reads tokens from the input field or the `INAT_API_TOKEN`
+  environment variable — **no credentials are stored in the source.** Don't
+  commit your token.
 - API requests are paced (rate-limited) to be a good iNaturalist API citizen.
 - This is personal tooling shared as-is; the defaults are tailored to one
   workflow but every field is configurable in the GUI.
