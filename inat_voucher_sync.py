@@ -1003,7 +1003,7 @@ class AutocompleteEntry(tk.Frame):
     """
 
     def __init__(self, parent, textvariable, on_query, on_select,
-                 min_chars=2, delay=280):
+                 min_chars=2, delay=280, pad_left=0):
         super().__init__(parent, bg=COL["card_bg"])
         self._var = textvariable
         self._on_query = on_query
@@ -1015,12 +1015,20 @@ class AutocompleteEntry(tk.Frame):
         self._listbox = None
         self._items = []
 
+        # Border lives on a wrapper frame so the entry text can be inset
+        # `pad_left` px (tk.Entry has no internal padding); the frame's border
+        # tracks focus for the usual blue focus ring.
+        self._field = tk.Frame(self, bg=COL["card_bg"], highlightthickness=1,
+                               highlightbackground=COL["card_border"])
+        self._field.pack(fill="x")
         self._entry = tk.Entry(
-            self, textvariable=self._var, bd=0, relief="flat",
-            highlightthickness=1, highlightbackground=COL["card_border"],
-            highlightcolor=COL["primary"], bg=COL["card_bg"], fg=COL["text"],
+            self._field, textvariable=self._var, bd=0, relief="flat",
+            bg=COL["card_bg"], fg=COL["text"],
             insertbackground=COL["text"], font=F["body"])
-        self._entry.pack(fill="x", ipady=5)
+        self._entry.pack(fill="x", expand=True, ipady=5, padx=(pad_left, 0))
+        self._entry.bind(
+            "<FocusIn>",
+            lambda _e: self._field.configure(highlightbackground=COL["primary"]))
         self._entry.bind("<KeyRelease>", self._on_key)
         self._entry.bind("<Down>", self._focus_list)
         self._entry.bind("<Return>", self._on_return)
@@ -1077,9 +1085,10 @@ class AutocompleteEntry(tk.Frame):
     def _position_popup(self, n):
         self._listbox.configure(height=min(n, 8))
         self._popup.update_idletasks()
-        x = self._entry.winfo_rootx()
-        y = self._entry.winfo_rooty() + self._entry.winfo_height() + 2
-        w = self._entry.winfo_width()
+        # Align the dropdown to the field's visible box, not the inset entry.
+        x = self._field.winfo_rootx()
+        y = self._field.winfo_rooty() + self._field.winfo_height() + 2
+        w = self._field.winfo_width()
         h = self._listbox.winfo_reqheight()
         self._popup.wm_geometry(f"{w}x{h}+{x}+{y}")
         self._popup.lift()
@@ -1113,6 +1122,7 @@ class AutocompleteEntry(tk.Frame):
         self._on_select(value, label)
 
     def _on_focus_out(self, _evt):
+        self._field.configure(highlightbackground=COL["card_border"])
         # Defer so a click landing on the listbox is processed first.
         self.after(150, self._maybe_hide)
 
@@ -1448,6 +1458,28 @@ class VoucherSyncApp(tk.Tk):
             width=width or 0, show=show,
         )
 
+    def _inset_entry(self, parent, var, pad_left=8, show=None):
+        """A text entry whose content sits `pad_left` px in from the left edge.
+
+        tk.Entry has no internal text padding, so the border lives on a wrapper
+        frame and the entry is packed with left padding inside it; the frame's
+        border tracks focus to keep the same blue focus ring as other fields.
+        Returns (field_frame, entry) — pack the frame.
+        """
+        bg = COL["card_bg"]
+        field = tk.Frame(parent, bg=bg, highlightthickness=1,
+                         highlightbackground=COL["card_border"])
+        entry = tk.Entry(field, textvariable=var, bd=0, relief="flat", bg=bg,
+                         fg=COL["text"], insertbackground=COL["text"],
+                         font=F["body"], show=show)
+        entry.pack(fill="x", expand=True, padx=(pad_left, 0), ipady=5)
+        entry.bind("<FocusIn>",
+                   lambda _e: field.configure(highlightbackground=COL["primary"]))
+        entry.bind("<FocusOut>",
+                   lambda _e: field.configure(
+                       highlightbackground=COL["card_border"]))
+        return field, entry
+
     def _secondary_btn(self, parent, text, command, padx=14):
         return FlatButton(
             parent, text=text, command=command, font=F["btn_sm"],
@@ -1513,10 +1545,28 @@ class VoucherSyncApp(tk.Tk):
                             self._load_token_file, padx=13).pack(
             side="left", padx=(8, 0))
 
+        # Where to get a token + what to know about it: the page only shows the
+        # token while you're signed in to iNaturalist, and tokens expire after
+        # about a day, so a fresh one is sometimes needed.
+        hint = tk.Frame(c, bg=bg)
+        hint.pack(fill="x", pady=(7, 0))
+        tk.Label(hint,
+                 text="Sign in to iNaturalist, then copy your token from the "
+                      "API token page. Tokens expire after about 24 hours.",
+                 bg=bg, fg=COL["muted"], font=F["help"], justify="left",
+                 wraplength=360).pack(anchor="w")
+        link = tk.Label(hint, text="Open the API token page ↗", bg=bg,
+                        fg=COL["primary"], cursor="hand2",
+                        font=(F["help"][0], F["help"][1], "underline"))
+        link.pack(anchor="w", pady=(2, 0))
+        link.bind("<Button-1>",
+                  lambda _e: webbrowser.open(f"{WEB}/users/api_token"))
+
         # Username
         self._field_label(c, "Username", bg, pady=(14, 5))
         self._user_var = tk.StringVar(value=DEFAULT_USER)
-        self._entry(c, self._user_var).pack(fill="x", ipady=5)
+        user_field, _ = self._inset_entry(c, self._user_var)
+        user_field.pack(fill="x")
 
         # Observation field — a predictive picker rather than a raw numeric ID.
         # Type to search iNaturalist's fields live; `_field_id_var` keeps the
@@ -1528,7 +1578,8 @@ class VoucherSyncApp(tk.Tk):
             value=f"{DEFAULT_FIELD_NAME} (#{DEFAULT_FIELD_ID})")
         self._field_widget = AutocompleteEntry(
             c, self._field_name_var,
-            on_query=self._field_query, on_select=self._field_chosen)
+            on_query=self._field_query, on_select=self._field_chosen,
+            pad_left=8)
         self._field_widget.pack(fill="x")
 
         tk.Label(c, text="Start typing to search the fields that store "
