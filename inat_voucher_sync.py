@@ -109,6 +109,15 @@ VOUCHER_FORMATS = [
 ]
 DEFAULT_VOUCHER_FORMAT = VOUCHER_FORMATS[0][0]
 
+# Example codes shown as live hint text under the pattern field, one entry per
+# format name above.  They illustrate what each preset matches so the user can
+# tell at a glance whether it fits their labels; "Custom" points at the box.
+VOUCHER_FORMAT_EXAMPLES = {
+    "Prefix-Number": "BT-001, AB12-34567",
+    "Numbers only":  "00421, 123456",
+    "Alphanumeric":  "AB12, 4F9X, X7Y9Z2",
+}
+
 UPDATE = "update"
 SKIP   = "skip"
 FLAG   = "flag"
@@ -1121,6 +1130,154 @@ class AutocompleteEntry(tk.Frame):
             self._listbox = None
 
 
+class DatePicker(tk.Frame):
+    """A DD/MM/YYYY text entry paired with a pop-up month calendar.
+
+    The entry keeps the existing text contract (so validation and the API
+    date conversion are unchanged), while the calendar button opens a
+    point-and-click month grid.  Bound to a StringVar; selecting a day writes
+    DD/MM/YYYY back into it.  Built by hand for the same reason as the other
+    widgets here — Tkinter ships no date picker and the app stays dependency-
+    light.
+    """
+
+    _WEEKDAYS = ("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")
+
+    def __init__(self, parent, variable, bg=None, width=11):
+        bg = bg or COL["card_bg"]
+        super().__init__(parent, bg=bg)
+        self._var = variable
+        self._bg = bg
+        self._popup = None
+        self._view = None          # first-of-month date currently shown
+        self._click_bind = None
+
+        self._entry = tk.Entry(
+            self, textvariable=variable, bd=0, relief="flat",
+            highlightthickness=1, highlightbackground=COL["card_border"],
+            highlightcolor=COL["primary"], bg=bg, fg=COL["text"],
+            insertbackground=COL["text"], font=F["mono"],
+            width=width, justify="center")
+        self._entry.pack(side="left", ipady=4)
+        self._btn = tk.Label(self, text="📅", bg=bg, fg=COL["text_med"],
+                             font=F["body"], cursor="hand2", padx=6)
+        self._btn.pack(side="left")
+        self._btn.bind("<Button-1>", lambda _e: self._toggle())
+        self._entry.bind("<Escape>", lambda _e: self._close())
+
+    # ---- value <-> date helpers ----------------------------------------- #
+    def _parse(self):
+        """Return the entry's current value as a date, or None if unparseable."""
+        try:
+            d, m, y = (self._var.get() or "").strip().split("/")
+            return datetime.date(int(y), int(m), int(d))
+        except (ValueError, AttributeError):
+            return None
+
+    # ---- popup lifecycle ------------------------------------------------- #
+    def _toggle(self):
+        self._close() if self._popup else self._open()
+
+    def _open(self):
+        self._view = (self._parse() or datetime.date.today()).replace(day=1)
+        self._popup = tk.Toplevel(self)
+        self._popup.wm_overrideredirect(True)
+        self._popup.configure(bg=COL["card_bg"], highlightthickness=1,
+                              highlightbackground=COL["card_border"])
+        self._render()
+        self._place()
+        # Dismiss on a click anywhere outside the popup (and outside our button,
+        # which toggles on its own).
+        self._click_bind = self.winfo_toplevel().bind(
+            "<Button-1>", self._maybe_close, add="+")
+
+    def _place(self):
+        self._popup.update_idletasks()
+        x = self._entry.winfo_rootx()
+        y = self._entry.winfo_rooty() + self._entry.winfo_height() + 3
+        self._popup.wm_geometry(f"+{x}+{y}")
+        self._popup.lift()
+
+    def _maybe_close(self, evt):
+        if not self._popup:
+            return
+        for w in (self._popup, self._btn):
+            wx, wy = w.winfo_rootx(), w.winfo_rooty()
+            if (wx <= evt.x_root <= wx + w.winfo_width() and
+                    wy <= evt.y_root <= wy + w.winfo_height()):
+                return
+        self._close()
+
+    def _close(self):
+        if self._popup:
+            self._popup.destroy()
+            self._popup = None
+        if self._click_bind:
+            self.winfo_toplevel().unbind("<Button-1>", self._click_bind)
+            self._click_bind = None
+
+    # ---- rendering ------------------------------------------------------- #
+    def _shift(self, months):
+        m = self._view.month - 1 + months
+        self._view = datetime.date(self._view.year + m // 12, m % 12 + 1, 1)
+        self._render()
+
+    def _select(self, d):
+        self._var.set(d.strftime("%d/%m/%Y"))
+        self._close()
+
+    def _render(self):
+        import calendar
+        for w in self._popup.winfo_children():
+            w.destroy()
+        bg = COL["card_bg"]
+        pad = tk.Frame(self._popup, bg=bg)
+        pad.pack(padx=8, pady=8)
+
+        head = tk.Frame(pad, bg=bg)
+        head.pack(fill="x", pady=(0, 6))
+        prev = tk.Label(head, text="‹", bg=bg, fg=COL["text_med"],
+                        font=F["btn"], cursor="hand2", padx=8)
+        prev.pack(side="left")
+        prev.bind("<Button-1>", lambda _e: self._shift(-1))
+        tk.Label(head, text=self._view.strftime("%B %Y"), bg=bg,
+                 fg=COL["text"], font=F["label"]).pack(side="left", expand=True)
+        nxt = tk.Label(head, text="›", bg=bg, fg=COL["text_med"],
+                       font=F["btn"], cursor="hand2", padx=8)
+        nxt.pack(side="right")
+        nxt.bind("<Button-1>", lambda _e: self._shift(1))
+
+        grid = tk.Frame(pad, bg=bg)
+        grid.pack()
+        for col, wd in enumerate(self._WEEKDAYS):
+            tk.Label(grid, text=wd, bg=bg, fg=COL["muted"], font=F["count"],
+                     width=3).grid(row=0, column=col, padx=1, pady=(0, 2))
+
+        selected = self._parse()
+        today = datetime.date.today()
+        weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
+            self._view.year, self._view.month)
+        for r, week in enumerate(weeks, start=1):
+            for col, day in enumerate(week):
+                if day == 0:
+                    continue
+                d = datetime.date(self._view.year, self._view.month, day)
+                is_sel = selected == d
+                rest_bg = COL["primary"] if is_sel else (
+                    COL["track"] if d == today else bg)
+                cell = tk.Label(
+                    grid, text=str(day), width=3, cursor="hand2",
+                    font=F["body"], bg=rest_bg,
+                    fg="#ffffff" if is_sel else COL["text"])
+                cell.grid(row=r, column=col, padx=1, pady=1)
+                cell.bind("<Button-1>", lambda _e, dd=d: self._select(dd))
+                if not is_sel:
+                    cell.bind("<Enter>",
+                              lambda _e, w=cell: w.configure(bg=COL["track"]))
+                    cell.bind("<Leave>", lambda _e, w=cell, b=rest_bg:
+                              w.configure(bg=b))
+
+
 # ---------------------------------------------------------------------------
 # GUI — preview-queue row colours (zebra rows, amber flags, tinted updates)
 # ---------------------------------------------------------------------------
@@ -1391,18 +1548,21 @@ class VoucherSyncApp(tk.Tk):
                                          command=self._on_format_change)
         self._fmt_seg.pack(anchor="w")
 
-        pat = tk.Frame(c, bg=bg)
-        pat.pack(fill="x", pady=(9, 0))
-        tk.Label(pat, text="Pattern", bg=bg, fg=COL["muted"],
-                 font=F["help"]).pack(side="left", padx=(0, 8))
+        self._field_label(c, "Pattern", bg, pady=(11, 5))
         self._regex_var = tk.StringVar(value=DEFAULT_VOUCHER_RE)
         self._regex_entry = tk.Entry(
-            pat, textvariable=self._regex_var, bd=0, relief="flat",
+            c, textvariable=self._regex_var, bd=0, relief="flat",
             highlightthickness=1, highlightbackground=COL["divider"],
             highlightcolor=COL["primary"], bg=COL["subtle"],
             fg=COL["text_soft"], font=F["mono_sm"],
             insertbackground=COL["text"], readonlybackground=COL["subtle"])
-        self._regex_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self._regex_entry.pack(fill="x", ipady=4)
+        # Live hint: example codes for the selected format (set by
+        # _on_format_change, which runs once at startup and on every switch).
+        self._pattern_hint = tk.Label(c, text="", bg=bg, fg=COL["muted"],
+                                      font=F["help"], anchor="w",
+                                      justify="left")
+        self._pattern_hint.pack(anchor="w", pady=(5, 0))
 
         # Date filter — segmented Single day / Range + date input(s).
         self._field_label(c, "Date filter", bg, pady=(16, 6))
@@ -1415,19 +1575,15 @@ class VoucherSyncApp(tk.Tk):
 
         today = datetime.date.today().strftime("%d/%m/%Y")
         self._date_var = tk.StringVar(value=today)
-        self._date_entry = self._entry(drow, self._date_var, mono=True,
-                                       width=12)
-        self._date_entry.configure(justify="center")
+        self._date_entry = DatePicker(drow, self._date_var, bg=bg, width=11)
         self._date_start_var = tk.StringVar()
-        self._date_start_entry = self._entry(drow, self._date_start_var,
-                                             mono=True, width=11)
-        self._date_start_entry.configure(justify="center")
+        self._date_start_entry = DatePicker(drow, self._date_start_var, bg=bg,
+                                            width=10)
         self._lbl_to = tk.Label(drow, text="to", bg=bg, fg=COL["muted"],
                                 font=F["help"])
         self._date_end_var = tk.StringVar()
-        self._date_end_entry = self._entry(drow, self._date_end_var,
-                                           mono=True, width=11)
-        self._date_end_entry.configure(justify="center")
+        self._date_end_entry = DatePicker(drow, self._date_end_var, bg=bg,
+                                          width=10)
         tk.Label(c, text="DD / MM / YYYY", bg=bg, fg=COL["muted"],
                  font=F["help"]).pack(anchor="w", pady=(6, 0))
 
@@ -1514,13 +1670,18 @@ class VoucherSyncApp(tk.Tk):
 
     def _on_format_change(self):
         """Apply the selected voucher-format preset, or unlock the regex box
-        for the Custom option."""
-        pattern = dict(VOUCHER_FORMATS).get(self._format_var.get())
+        for the Custom option, and refresh the example hint."""
+        name = self._format_var.get()
+        pattern = dict(VOUCHER_FORMATS).get(name)
         if pattern is None:                      # Custom
             self._regex_entry.configure(state="normal", fg=COL["text"])
+            self._pattern_hint.configure(
+                text="Enter your own regular-expression pattern above.")
         else:
             self._regex_var.set(pattern)
             self._regex_entry.configure(state="readonly", fg=COL["text_soft"])
+            self._pattern_hint.configure(
+                text=f"Examples: {VOUCHER_FORMAT_EXAMPLES.get(name, '')}")
 
     def _toggle_dates(self):
         """Single-day shows one date box; Range swaps in start/to/end."""
