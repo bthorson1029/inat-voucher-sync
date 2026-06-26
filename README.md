@@ -102,10 +102,13 @@ Then in the window:
    start typing its name in the **Observation field** box and pick from the
    live suggestions — matching iNaturalist fields appear as you type, so you
    don't need to know the numeric ID.
-3. Pick the **code format** that matches your label (see below), and optionally
-   set a **date filter** (single day or range) or flip the **Overwrite existing
-   values** toggle. The **OCR fallback** is on by default; you can turn it off
-   or switch its **Engine** (built-in vs. Tesseract) in the OCR section.
+3. Pick the **code format** that matches your label (see below) — a live hint
+   under the **Pattern** field shows example codes for the selected format.
+   Optionally set a **date filter** (single day or range; click the 📅 button
+   to pick dates from a pop-up calendar, or type them as `DD/MM/YYYY`) or flip
+   the **Overwrite existing values** toggle. The **OCR fallback** is on by
+   default; you can turn it off or switch its **Engine** (built-in vs.
+   Tesseract) in the OCR section.
 4. Click **Preview run** to build the queue — hit **Stop** to abort a scan in
    progress — then review the color-coded results and **Apply updates**.
    **Export CSV** saves the queue, and the collapsible **Run log** at the bottom
@@ -174,8 +177,9 @@ SmartScreen may warn on first run.
 
 ## Notes
 
-- The tool reads tokens from input, a file, or `INAT_API_TOKEN` — **no
-  credentials are stored in the source.** Don't commit your token.
+- The tool reads tokens from the input field or the `INAT_API_TOKEN`
+  environment variable — **no credentials are stored in the source.** Don't
+  commit your token.
 - API requests are paced (rate-limited) to be a good iNaturalist API citizen.
 - This is personal tooling shared as-is; the defaults are tailored to one
   workflow but every field is configurable in the GUI.
