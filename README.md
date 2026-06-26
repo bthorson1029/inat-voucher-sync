@@ -92,10 +92,12 @@ python inat_voucher_sync.py
 
 Then in the window:
 
-1. **Paste your API token.** Get one at
-   https://www.inaturalist.org/users/api_token. The token can also be loaded
-   from a file or from the `INAT_API_TOKEN` environment variable. Once it
-   verifies, the status pill in the top-right turns green and shows your login.
+1. **Paste your API token.** Use the **Get a token ↗** link next to the field,
+   or go to https://www.inaturalist.org/users/api_token. The token can also be
+   supplied via the `INAT_API_TOKEN` environment variable. You must be signed
+   in to iNaturalist to see your token, and tokens expire after about 24 hours.
+   Once it verifies, the status pill in the top-right turns green and shows
+   your login.
 2. Enter your **username**, then choose the **observation field** to write to:
    start typing its name in the **Observation field** box and pick from the
    live suggestions — matching iNaturalist fields appear as you type, so you

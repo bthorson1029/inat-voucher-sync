@@ -1526,7 +1526,7 @@ class VoucherSyncApp(tk.Tk):
         bg = COL["card_bg"]
         self._eyebrow(c, "CONNECTION", bg)
 
-        # API token — inset field with a "✓ valid" status + Load from file.
+        # API token — inset field with a "✓ valid" status + token-page link.
         self._field_label(c, "API token", bg)
         tok_row = tk.Frame(c, bg=bg)
         tok_row.pack(fill="x")
@@ -1541,26 +1541,22 @@ class VoucherSyncApp(tk.Tk):
         self._token_status = tk.Label(tok_field, text="", bg=COL["subtle"],
                                       fg=COL["green"], font=F["help"])
         self._token_status.pack(side="left", padx=(0, 10))
-        self._secondary_btn(tok_row, "Load from file",
-                            self._load_token_file, padx=13).pack(
-            side="left", padx=(8, 0))
+        tok_link = tk.Label(
+            tok_row, text="Get a token ↗", bg=bg, fg=COL["primary"],
+            cursor="hand2", font=(F["btn_sm"][0], F["btn_sm"][1],
+                                  "bold underline"))
+        tok_link.pack(side="left", padx=(12, 4))
+        tok_link.bind("<Button-1>",
+                      lambda _e: webbrowser.open(f"{WEB}/users/api_token"))
 
-        # Where to get a token + what to know about it: the page only shows the
-        # token while you're signed in to iNaturalist, and tokens expire after
-        # about a day, so a fresh one is sometimes needed.
-        hint = tk.Frame(c, bg=bg)
-        hint.pack(fill="x", pady=(7, 0))
-        tk.Label(hint,
+        # What to know about the token: the page only shows it while you're
+        # signed in to iNaturalist, and tokens expire after about a day, so a
+        # fresh one is sometimes needed.
+        tk.Label(c,
                  text="Sign in to iNaturalist, then copy your token from the "
-                      "API token page. Tokens expire after about 24 hours.",
+                      "token page. Tokens expire after about 24 hours.",
                  bg=bg, fg=COL["muted"], font=F["help"], justify="left",
-                 wraplength=360).pack(anchor="w")
-        link = tk.Label(hint, text="Open the API token page ↗", bg=bg,
-                        fg=COL["primary"], cursor="hand2",
-                        font=(F["help"][0], F["help"][1], "underline"))
-        link.pack(anchor="w", pady=(2, 0))
-        link.bind("<Button-1>",
-                  lambda _e: webbrowser.open(f"{WEB}/users/api_token"))
+                 wraplength=360).pack(anchor="w", pady=(7, 0))
 
         # Username
         self._field_label(c, "Username", bg, pady=(14, 5))
@@ -1800,8 +1796,18 @@ class VoucherSyncApp(tk.Tk):
         bar = tk.Frame(parent, bg=COL["subtle"], highlightthickness=1,
                        highlightbackground=COL["divider"])
         bar.pack(fill="x", pady=(18, 0))
+
+        # Reminder shown above the run controls.
+        tk.Label(bar,
+                 text="Please note: You must have the photo that contains the "
+                      "specimen and voucher as the last image in your "
+                      "observation.",
+                 bg=COL["subtle"], fg=COL["text_med"], font=F["help"],
+                 anchor="w", justify="left").pack(
+            anchor="w", fill="x", padx=16, pady=(12, 10))
+
         inner = tk.Frame(bar, bg=COL["subtle"])
-        inner.pack(fill="x", padx=16, pady=12)
+        inner.pack(fill="x", padx=16, pady=(0, 12))
 
         self._btn_preview = FlatButton(
             inner, text="Preview run", command=self._start_preview,
@@ -1987,16 +1993,6 @@ class VoucherSyncApp(tk.Tk):
         if t:
             self._token_var.set(t)
             self._log_write("Token loaded from INAT_API_TOKEN environment variable.")
-
-    def _load_token_file(self):
-        path = filedialog.askopenfilename(
-            title="Select token file",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-        )
-        if path:
-            with open(path, encoding="utf-8") as fh:
-                self._token_var.set(fh.read().strip())
-            self._log_write(f"Token loaded from: {path}")
 
     def _get_dates(self):
         def to_api(s):
