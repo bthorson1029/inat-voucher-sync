@@ -1702,33 +1702,20 @@ class VoucherSyncApp(tk.Tk):
                  bg=COL["header_bg"], fg=COL["text_soft2"],
                  font=F["subtitle"]).pack(anchor="w", pady=(2, 0))
 
-        # Connection status pill — gray until a token verifies, then green.
-        self._conn_pill = tk.Frame(inner, highlightthickness=1)
-        self._conn_pill.pack(side="right")
-        self._conn_dot = tk.Canvas(self._conn_pill, width=10, height=10,
-                                   highlightthickness=0, bd=0)
-        self._conn_dot.pack(side="left", padx=(13, 7), pady=8)
-        self._conn_lbl = tk.Label(self._conn_pill, font=F["pill_lbl"])
-        self._conn_lbl.pack(side="left", padx=(0, 14), pady=7)
-        self._set_connected(None)
+        # Connection state is shown in the Connection card (signed-in banner /
+        # token status), so the header no longer carries a status pill.
 
         tk.Frame(self, bg=COL["card_border"], height=1).pack(fill="x")
 
     def _set_connected(self, login):
-        if login:
-            bg, fg, dot = COL["green_bg"], COL["green_text"], COL["green"]
-            text, border = f"Connected · {login}", COL["green_border"]
-            if hasattr(self, "_token_status"):
+        # Connection state lives in the Connection card now: the manual-token
+        # tab's inline "✓ valid" status…
+        if hasattr(self, "_token_status"):
+            if login:
                 self._token_status.configure(text="✓ valid", fg=COL["green"])
-        else:
-            bg, fg, dot = COL["subtle"], COL["muted"], COL["muted"]
-            text, border = "Not connected", COL["card_border"]
-        self._conn_pill.configure(bg=bg, highlightbackground=border)
-        self._conn_dot.configure(bg=bg)
-        self._conn_dot.delete("all")
-        self._conn_dot.create_oval(1, 1, 9, 9, fill=dot, outline="")
-        self._conn_lbl.configure(bg=bg, fg=fg, text=text)
-        # Swap the Sign-in tab between its call-to-action and the signed-in
+            else:
+                self._token_status.configure(text="")
+        # …and the Sign-in tab, which swaps its call-to-action for the signed-in
         # banner (which also carries the Sign out link).
         self._refresh_signin_tab(login)
 
@@ -1909,10 +1896,11 @@ class VoucherSyncApp(tk.Tk):
             row, text="", bg=COL["green_bg"], fg=COL["green_text"],
             font=F["label"], justify="left", anchor="w")
         self._signin_banner_lbl.pack(side="left")
+        # Sign out sits at the opposite (right) end of the banner.
         signout = tk.Label(
-            self._signin_banner, text="Sign out", bg=bg, fg=COL["text_soft2"],
+            row, text="Sign out", bg=COL["green_bg"], fg=COL["green_text"],
             cursor="hand2", font=(F["help"][0], F["help"][1], "underline"))
-        signout.pack(anchor="w", pady=(6, 4))
+        signout.pack(side="right")
         signout.bind("<Button-1>", lambda _e: self._sign_out())
 
         self._refresh_signin_tab(None)
@@ -2480,9 +2468,7 @@ class VoucherSyncApp(tk.Tk):
     def _sign_out(self):
         clear_credentials()
         self._token_var.set("")
-        self._set_connected(None)
-        if hasattr(self, "_token_status"):
-            self._token_status.configure(text="")
+        self._set_connected(None)   # clears the inline status and shows the CTA
         self._log_write("Signed out; saved session forgotten.")
 
     def _get_dates(self):
