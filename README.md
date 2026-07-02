@@ -92,12 +92,19 @@ python inat_voucher_sync.py
 
 Then in the window:
 
-1. **Paste your API token.** Use the **Get a token ↗** link next to the field,
-   or go to https://www.inaturalist.org/users/api_token. The token can also be
-   supplied via the `INAT_API_TOKEN` environment variable. You must be signed
-   in to iNaturalist to see your token, and tokens expire after about 24 hours.
-   Once it verifies, the status pill in the top-right turns green and shows
-   your login.
+1. **Connect to iNaturalist.** Click **Sign in with iNaturalist** — it opens
+   your browser, you click **Authorize** (you're usually already signed in, so
+   it's one click), and the app fetches a token for you. The status pill in the
+   top-right turns green and shows your login. Nothing to copy. After the first
+   sign-in the app **remembers you and silently refreshes the token on each
+   launch**, so you normally won't sign in again; use the small **Sign out**
+   link to forget the saved session.
+   *Prefer to do it by hand?* Paste a token via the **Get a token ↗** link or
+   https://www.inaturalist.org/users/api_token, or supply one through the
+   `INAT_API_TOKEN` environment variable. Tokens expire after about 24 hours.
+   (Browser sign-in requires a one-time developer setup — see
+   [Enabling browser sign-in](#enabling-browser-sign-in) — and falls back to
+   manual paste until that's done.)
 2. Enter your **username**, then choose the **observation field** to write to:
    start typing its name in the **Observation field** box and pick from the
    live suggestions — matching iNaturalist fields appear as you type, so you
@@ -149,6 +156,56 @@ text from a photo with no label is unlikely to be mistaken for a voucher.
 The default selection is set by `DEFAULT_VOUCHER_FORMAT` in the
 `USER CONFIGURATION` block, and the preset patterns live in `VOUCHER_FORMATS`.
 
+## Enabling browser sign-in
+
+**Sign in with iNaturalist** lets users authorize in their browser instead of
+copying a token by hand. Under the hood it's the OAuth2 Authorization Code flow
+with PKCE over a `localhost` loopback redirect: the app opens the browser,
+catches the redirect on a short-lived local server, exchanges the code for an
+access token, then calls `/users/api_token` to mint the same 24-hour JWT the app
+already uses. No extra dependencies — it's all Python standard library.
+
+This build is already wired to a registered iNaturalist application
+([#1027](https://www.inaturalist.org/oauth/applications/1027)), configured as a
+**public (non-confidential) client** — so PKCE alone secures the flow and **no
+client secret is shipped or committed**. The Client ID lives in the `OAuth
+sign-in` constants block near the top of `inat_voucher_sync.py`.
+
+To point it at your own application instead (one-time, by the developer — not by
+each user):
+
+1. Register an application at
+   https://www.inaturalist.org/oauth/applications, leaving **Confidential**
+   unchecked so it's a public client.
+2. Set its **redirect URI** to exactly `http://127.0.0.1:8579/callback`
+   (must match `OAUTH_REDIRECT_PORT` in `inat_voucher_sync.py`).
+3. Put the app's **Client ID** in `OAUTH_CLIENT_ID`.
+4. Leave `OAUTH_CLIENT_SECRET` blank for a public client. Only set it if you
+   register a *confidential* client — and if so, load it from an environment
+   variable rather than committing it, especially in a public repo.
+
+If `OAUTH_CLIENT_ID` is ever blanked out, the Sign-in button just explains that
+it isn't set up, and the manual token paste / `INAT_API_TOKEN` paths keep working
+unchanged.
+
+### Staying signed in
+
+After a successful sign-in the app saves the long-lived OAuth credentials (the
+access token, and a refresh token if iNaturalist issues one) to
+`~/.inat_voucher_sync/credentials.json` — **not** the 24-hour JWT. On each
+launch it uses them to mint a fresh JWT silently, so you don't sign in again. If
+the saved session has been revoked, it's discarded quietly and you just sign in
+once more.
+
+This file is an account credential. It's written with owner-only permissions
+where the OS supports it (POSIX `chmod 600`; on Windows it relies on your user
+profile's normal protection). **Sign out** deletes it. If you'd rather not store
+anything on disk, skip browser sign-in and paste a token each session instead.
+
+> **Status:** implemented and wired to a registered public client, but not yet
+> smoke-tested end-to-end (browser authorize → token) on this machine. Run one
+> sign-in to confirm before relying on it.
+
 ## Building the Windows executable
 
 The standalone `VoucherSync.exe` is produced with
@@ -177,9 +234,12 @@ SmartScreen may warn on first run.
 
 ## Notes
 
-- The tool reads tokens from the input field or the `INAT_API_TOKEN`
-  environment variable — **no credentials are stored in the source.** Don't
-  commit your token.
+- The tool gets its token from browser sign-in, the input field, or the
+  `INAT_API_TOKEN` environment variable — **no credentials are stored in the
+  source.** Browser sign-in keeps your password in your browser (the app never
+  sees it). If you sign in, the OAuth credentials are saved to
+  `~/.inat_voucher_sync/credentials.json` so the app can refresh your token
+  without prompting; **Sign out** removes it. Don't commit your token.
 - API requests are paced (rate-limited) to be a good iNaturalist API citizen.
 - This is personal tooling shared as-is; the defaults are tailored to one
   workflow but every field is configurable in the GUI.
