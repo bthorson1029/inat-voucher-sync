@@ -25,15 +25,21 @@ Run:
   python inat_voucher_sync.py
 """
 
+import base64
 import csv
+import hashlib
+import json
 import os
 import queue
 import re
+import secrets
 import sys
 import time
 import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlencode, urlparse, parse_qs
 
 import datetime
 import tkinter as tk
@@ -60,7 +66,40 @@ except ImportError:
 # ---------------------------------------------------------------------------
 API        = "https://api.inaturalist.org/v1"
 WEB        = "https://www.inaturalist.org"
-USER_AGENT = "inat-voucher-sync/1.0 (personal voucher tooling)"
+USER_AGENT = ("inat-voucher-sync/1.0 "
+              "(+https://github.com/bthorson1029/inat-voucher-sync)")
+
+# ---------------------------------------------------------------------------
+# OAuth sign-in  ("Sign in with iNaturalist")
+#
+# Lets the user authorize in their browser and have the app mint an API token
+# for them, instead of copying one from the token page by hand.  The flow is
+# OAuth2 Authorization Code with PKCE over a localhost loopback redirect
+# (RFC 8252): the app opens the browser, catches the redirect on a short-lived
+# local server, exchanges the code for an OAuth access token, then calls
+# /users/api_token to get the same 24-hour JWT the rest of the app already uses.
+#
+# ONE-TIME DEVELOPER SETUP (not per user): register an application at
+#   https://www.inaturalist.org/oauth/applications
+# and paste its Client ID below.  Register the redirect URI EXACTLY as
+#   http://127.0.0.1:8579/callback
+# (matching OAUTH_REDIRECT_PORT below).  If iNaturalist registers the app as a
+# confidential client that requires a secret at the token step, also fill
+# OAUTH_CLIENT_SECRET; if it accepts a public client with PKCE, leave it blank.
+# Until OAUTH_CLIENT_ID is filled in, the Sign-in button explains this and the
+# manual token paste / INAT_API_TOKEN paths keep working unchanged.
+# Registered application #1027 (public / non-confidential client). Because it's
+# non-confidential, PKCE alone secures the flow and NO secret is sent or shipped
+# — OAUTH_CLIENT_SECRET stays blank on purpose (never commit a secret to a
+# public repo). The Client ID is not sensitive.
+OAUTH_CLIENT_ID     = "UAXeDpCOFXTyUrdP3Eyr-bkioGE0iY0bes1niyaEzaI"
+OAUTH_CLIENT_SECRET = ""   # intentionally blank: public client uses PKCE, no secret
+OAUTH_REDIRECT_PORT = 8579
+OAUTH_SCOPE         = "login write"   # write is needed to set observation fields
+
+OAUTH_AUTHORIZE_URL = f"{WEB}/oauth/authorize"
+OAUTH_TOKEN_URL     = f"{WEB}/oauth/token"
+API_TOKEN_URL       = f"{WEB}/users/api_token"
 
 # ---------------------------------------------------------------------------
 # USER CONFIGURATION
@@ -228,6 +267,259 @@ class INatClient:
                 fields.append({"id": fid, "name": name,
                                "datatype": f.get("datatype", "")})
         return fields
+
+
+# ---------------------------------------------------------------------------
+# OAuth sign-in  (Authorization Code + PKCE over a localhost loopback redirect)
+# ---------------------------------------------------------------------------
+class OAuthError(Exception):
+    """Raised when the browser sign-in flow can't produce an API token."""
+
+
+def oauth_configured():
+    """True once the developer has pasted a Client ID (see OAUTH_CLIENT_ID)."""
+    return bool(OAUTH_CLIENT_ID)
+
+
+def _pkce_pair():
+    """Return (code_verifier, code_challenge) for PKCE S256 per RFC 7636."""
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode()
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+class _CallbackHandler(BaseHTTPRequestHandler):
+    """Captures the single OAuth redirect, then shows a close-me page."""
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/callback":
+            self.send_response(404)
+            self.end_headers()
+            return
+        params = parse_qs(parsed.query)
+        # Only the real redirect carries code/error; ignore favicon etc.
+        if "code" in params or "error" in params:
+            self.server.oauth_response = params
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(
+            b"<html><body style='font-family:sans-serif;padding:48px;"
+            b"text-align:center'><h2>iNaturalist sign-in complete</h2>"
+            b"<p>You can close this tab and return to Voucher Sync.</p>"
+            b"</body></html>")
+
+    def log_message(self, *_args):
+        pass  # keep the local server silent
+
+
+def oauth_login(open_browser=True, timeout=300, log=None):
+    """Run the browser sign-in flow and return (api_token_jwt, access_token).
+
+    Steps: open the iNaturalist authorize page in the user's browser, catch the
+    redirect on a localhost server, exchange the code (with the PKCE verifier)
+    for an OAuth access token, then call /users/api_token to mint the JWT the
+    app uses.  Raises OAuthError with a user-facing message on any failure.
+
+    `log` is an optional callable for progress lines.
+    """
+    if not oauth_configured():
+        raise OAuthError(
+            "Browser sign-in isn't set up in this build.\n\n"
+            "The developer needs to register an iNaturalist application and "
+            "paste its Client ID into the app (see OAUTH_CLIENT_ID).\n\n"
+            "For now, use the token page and paste your token instead.")
+
+    def _say(msg):
+        if log:
+            log(msg)
+
+    verifier, challenge = _pkce_pair()
+    state = secrets.token_urlsafe(24)
+    redirect_uri = f"http://127.0.0.1:{OAUTH_REDIRECT_PORT}/callback"
+
+    try:
+        server = HTTPServer(("127.0.0.1", OAUTH_REDIRECT_PORT), _CallbackHandler)
+    except OSError as exc:
+        raise OAuthError(
+            f"Couldn't start the local sign-in listener on port "
+            f"{OAUTH_REDIRECT_PORT}.\n\nIt may be in use by another program. "
+            f"Close it and try again.\n\n({exc})")
+    server.timeout = 1
+    server.oauth_response = None
+
+    authorize_url = f"{OAUTH_AUTHORIZE_URL}?" + urlencode({
+        "client_id": OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "scope": OAUTH_SCOPE,
+        "state": state,
+    })
+
+    try:
+        _say("Opening your browser to sign in to iNaturalist…")
+        if open_browser:
+            webbrowser.open(authorize_url)
+
+        deadline = time.time() + timeout
+        while server.oauth_response is None and time.time() < deadline:
+            server.handle_request()
+    finally:
+        server.server_close()
+
+    params = server.oauth_response
+    if params is None:
+        raise OAuthError("Sign-in timed out before it completed. Try again.")
+    if params.get("state", [None])[0] != state:
+        raise OAuthError("Sign-in failed a security check (state mismatch). "
+                         "Try again.")
+    if "error" in params:
+        raise OAuthError(
+            "iNaturalist didn't grant access "
+            f"({params['error'][0]}). You can try again, or paste a token "
+            "manually instead.")
+    code = params.get("code", [None])[0]
+    if not code:
+        raise OAuthError("Sign-in returned no authorization code. Try again.")
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+
+    _say("Exchanging the authorization code for an access token…")
+    token_body = {
+        "client_id": OAUTH_CLIENT_ID,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+        "code_verifier": verifier,
+    }
+    if OAUTH_CLIENT_SECRET:
+        token_body["client_secret"] = OAUTH_CLIENT_SECRET
+    creds = _oauth_token_request(token_body, session)
+
+    _say("Fetching your API token…")
+    api_token = fetch_api_token(creds["access_token"], session)
+    return api_token, creds
+
+
+def _oauth_token_request(body, session):
+    """POST to the OAuth token endpoint and return a creds dict carrying the
+    access token (and refresh token, if iNaturalist issues one)."""
+    try:
+        r = session.post(OAUTH_TOKEN_URL, data=body, timeout=30)
+        r.raise_for_status()
+        payload = r.json()
+    except requests.RequestException as exc:
+        raise OAuthError(f"Couldn't exchange credentials for a token: {exc}")
+    access_token = payload.get("access_token")
+    if not access_token:
+        raise OAuthError("iNaturalist returned no access token.")
+    creds = {"access_token": access_token}
+    if payload.get("refresh_token"):
+        creds["refresh_token"] = payload["refresh_token"]
+    return creds
+
+
+def fetch_api_token(access_token, session=None):
+    """Exchange an OAuth access token for a fresh 24-hour API JWT.
+
+    This is what makes silent daily refresh possible: the access token is
+    long-lived, so on each launch the app can mint a new JWT without the user
+    signing in again.  Raises OAuthError on failure.
+    """
+    own = session is None
+    if own:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+    try:
+        r = session.get(
+            API_TOKEN_URL,
+            headers={"Authorization": f"Bearer {access_token}"}, timeout=30)
+        r.raise_for_status()
+        api_token = r.json().get("api_token")
+    except requests.RequestException as exc:
+        raise OAuthError(f"Couldn't fetch your API token: {exc}")
+    finally:
+        if own:
+            session.close()
+    if not api_token:
+        raise OAuthError("iNaturalist returned no API token.")
+    return api_token
+
+
+def refresh_access_token(refresh_token):
+    """Trade a refresh token for a new access token (creds dict).
+
+    Only used if iNaturalist's access tokens turn out to expire and it issued a
+    refresh token; the common case is non-expiring access tokens, where this is
+    never reached.
+    """
+    body = {
+        "client_id": OAUTH_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    if OAUTH_CLIENT_SECRET:
+        body["client_secret"] = OAUTH_CLIENT_SECRET
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    try:
+        return _oauth_token_request(body, session)
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# Saved-credential storage  (enables silent token refresh between launches)
+#
+# We persist the long-lived OAuth credentials — NOT the 24-hour JWT — so the
+# app can mint a fresh JWT on startup without prompting again.  This is an
+# account credential: it lives in a per-user file with owner-only permissions
+# where the OS supports it.  "Sign out" deletes it.  Users who'd rather not
+# store anything can ignore browser sign-in and paste a token each session.
+# ---------------------------------------------------------------------------
+def _credentials_path():
+    return os.path.join(
+        os.path.expanduser("~"), ".inat_voucher_sync", "credentials.json")
+
+
+def save_credentials(creds):
+    """Persist the OAuth creds dict (access/refresh token) for next launch."""
+    path = _credentials_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(creds, fh)
+        try:
+            os.chmod(path, 0o600)   # best-effort; no-op on some platforms
+        except OSError:
+            pass
+    except OSError:
+        pass  # persistence is a convenience; never block sign-in on it
+
+
+def load_credentials():
+    """Return the saved creds dict, or None if there isn't a usable one."""
+    try:
+        with open(_credentials_path(), encoding="utf-8") as fh:
+            creds = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if isinstance(creds, dict) and creds.get("access_token"):
+        return creds
+    return None
+
+
+def clear_credentials():
+    """Forget any saved sign-in (used by Sign out and on refresh failure)."""
+    try:
+        os.remove(_credentials_path())
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1329,6 +1621,7 @@ class VoucherSyncApp(tk.Tk):
         self._build_ui()
         self._poll()
         self._load_env_token()
+        self._try_silent_refresh()
 
     def _init_style(self):
         """Theme ttk widgets (Treeview, Progressbar, Scrollbar) to the palette.
@@ -1409,32 +1702,22 @@ class VoucherSyncApp(tk.Tk):
                  bg=COL["header_bg"], fg=COL["text_soft2"],
                  font=F["subtitle"]).pack(anchor="w", pady=(2, 0))
 
-        # Connection status pill — gray until a token verifies, then green.
-        self._conn_pill = tk.Frame(inner, highlightthickness=1)
-        self._conn_pill.pack(side="right")
-        self._conn_dot = tk.Canvas(self._conn_pill, width=10, height=10,
-                                   highlightthickness=0, bd=0)
-        self._conn_dot.pack(side="left", padx=(13, 7), pady=8)
-        self._conn_lbl = tk.Label(self._conn_pill, font=F["pill_lbl"])
-        self._conn_lbl.pack(side="left", padx=(0, 14), pady=7)
-        self._set_connected(None)
+        # Connection state is shown in the Connection card (signed-in banner /
+        # token status), so the header no longer carries a status pill.
 
         tk.Frame(self, bg=COL["card_border"], height=1).pack(fill="x")
 
     def _set_connected(self, login):
-        if login:
-            bg, fg, dot = COL["green_bg"], COL["green_text"], COL["green"]
-            text, border = f"Connected · {login}", COL["green_border"]
-            if hasattr(self, "_token_status"):
+        # Connection state lives in the Connection card now: the manual-token
+        # tab's inline "✓ valid" status…
+        if hasattr(self, "_token_status"):
+            if login:
                 self._token_status.configure(text="✓ valid", fg=COL["green"])
-        else:
-            bg, fg, dot = COL["subtle"], COL["muted"], COL["muted"]
-            text, border = "Not connected", COL["card_border"]
-        self._conn_pill.configure(bg=bg, highlightbackground=border)
-        self._conn_dot.configure(bg=bg)
-        self._conn_dot.delete("all")
-        self._conn_dot.create_oval(1, 1, 9, 9, fill=dot, outline="")
-        self._conn_lbl.configure(bg=bg, fg=fg, text=text)
+            else:
+                self._token_status.configure(text="")
+        # …and the Sign-in tab, which swaps its call-to-action for the signed-in
+        # banner (which also carries the Sign out link).
+        self._refresh_signin_tab(login)
 
     # ----- small shared builders ------------------------------------------- #
     def _make_card(self, parent, bg=None):
@@ -1526,37 +1809,24 @@ class VoucherSyncApp(tk.Tk):
         bg = COL["card_bg"]
         self._eyebrow(c, "CONNECTION", bg)
 
-        # API token — inset field with a "✓ valid" status + token-page link.
-        self._field_label(c, "API token", bg)
-        tok_row = tk.Frame(c, bg=bg)
-        tok_row.pack(fill="x")
-        tok_field = tk.Frame(tok_row, bg=COL["subtle"], highlightthickness=1,
-                             highlightbackground=COL["card_border"])
-        tok_field.pack(side="left", fill="x", expand=True)
-        self._token_var = tk.StringVar()
-        tk.Entry(tok_field, textvariable=self._token_var, show="•", bd=0,
-                 relief="flat", bg=COL["subtle"], fg=COL["text"],
-                 font=F["mono"], insertbackground=COL["text"]).pack(
-            side="left", fill="x", expand=True, padx=(10, 6), pady=8)
-        self._token_status = tk.Label(tok_field, text="", bg=COL["subtle"],
-                                      fg=COL["green"], font=F["help"])
-        self._token_status.pack(side="left", padx=(0, 10))
-        tok_link = tk.Label(
-            tok_row, text="Get a token ↗", bg=bg, fg=COL["primary"],
-            cursor="hand2", font=(F["btn_sm"][0], F["btn_sm"][1],
-                                  "bold underline"))
-        tok_link.pack(side="left", padx=(12, 4))
-        tok_link.bind("<Button-1>",
-                      lambda _e: webbrowser.open(f"{WEB}/users/api_token"))
+        # Two ways to connect, as tabs: browser Sign in (the primary, default
+        # path) and manual API token entry.
+        self._conn_mode = tk.StringVar(value="signin")
+        SegmentedControl(
+            c, [("Sign in", "signin"), ("API token", "manual")],
+            self._conn_mode, command=self._on_conn_mode).pack(
+            anchor="w", pady=(0, 12))
 
-        # What to know about the token: the page only shows it while you're
-        # signed in to iNaturalist, and tokens expire after about a day, so a
-        # fresh one is sometimes needed.
-        tk.Label(c,
-                 text="Sign in to iNaturalist, then copy your token from the "
-                      "token page. Tokens expire after about 24 hours.",
-                 bg=bg, fg=COL["muted"], font=F["help"], justify="left",
-                 wraplength=360).pack(anchor="w", pady=(7, 0))
+        # One content area holding both tab panels; only the active one is
+        # packed (swapped by _on_conn_mode), so its slot stays above Username.
+        self._conn_tab_area = tk.Frame(c, bg=bg)
+        self._conn_tab_area.pack(fill="x")
+        self._tab_signin = tk.Frame(self._conn_tab_area, bg=bg)
+        self._tab_manual = tk.Frame(self._conn_tab_area, bg=bg)
+
+        self._build_signin_tab(self._tab_signin, bg)
+        self._build_manual_token_tab(self._tab_manual, bg)
+        self._on_conn_mode()  # show the active tab
 
         # Username
         self._field_label(c, "Username", bg, pady=(14, 5))
@@ -1582,6 +1852,100 @@ class VoucherSyncApp(tk.Tk):
                          "voucher codes.",
                  bg=bg, fg=COL["muted"], font=F["help"]).pack(
             anchor="w", pady=(7, 0))
+
+    def _on_conn_mode(self):
+        """Show the panel for the selected connection tab."""
+        self._tab_signin.pack_forget()
+        self._tab_manual.pack_forget()
+        if self._conn_mode.get() == "signin":
+            self._tab_signin.pack(fill="x")
+        else:
+            self._tab_manual.pack(fill="x")
+
+    def _build_signin_tab(self, parent, bg):
+        """Browser sign-in.  Two states, swapped by _refresh_signin_tab:
+        the big call-to-action when signed out, and a signed-in banner naming
+        the account (with a Sign out link) once connected."""
+        # ---- Signed-out: the primary call to action -----------------------
+        self._signin_prompt = tk.Frame(parent, bg=bg)
+        self._btn_signin = FlatButton(
+            self._signin_prompt, text="Sign in with iNaturalist",
+            command=self._oauth_sign_in,
+            fg="#ffffff", bg=COL["primary"], active=COL["primary_press"],
+            disabled_fg="#ffffff", disabled_bg=COL["muted2"],
+            font=F["btn"], padx=22)
+        self._btn_signin.pack(fill="x", pady=(0, 4))
+        tk.Label(self._signin_prompt,
+                 text="Opens your browser to authorize — no token to copy. "
+                      "You stay signed in, so it's usually one click, and the "
+                      "app remembers you for next time.",
+                 bg=bg, fg=COL["muted"], font=F["help"], justify="left",
+                 wraplength=360).pack(anchor="w", pady=(0, 4))
+
+        # ---- Signed-in: a green banner naming the account, plus Sign out ----
+        self._signin_banner = tk.Frame(parent, bg=bg)
+        card = tk.Frame(self._signin_banner, bg=COL["green_bg"],
+                        highlightthickness=1,
+                        highlightbackground=COL["green_border"])
+        card.pack(fill="x")
+        row = tk.Frame(card, bg=COL["green_bg"])
+        row.pack(fill="x", padx=12, pady=10)
+        tk.Label(row, text="✓", bg=COL["green_bg"], fg=COL["green"],
+                 font=F["btn"]).pack(side="left", padx=(0, 9))
+        self._signin_banner_lbl = tk.Label(
+            row, text="", bg=COL["green_bg"], fg=COL["green_text"],
+            font=F["label"], justify="left", anchor="w")
+        self._signin_banner_lbl.pack(side="left")
+        # Sign out sits at the opposite (right) end of the banner.
+        signout = tk.Label(
+            row, text="Sign out", bg=COL["green_bg"], fg=COL["green_text"],
+            cursor="hand2", font=(F["help"][0], F["help"][1], "underline"))
+        signout.pack(side="right")
+        signout.bind("<Button-1>", lambda _e: self._sign_out())
+
+        self._refresh_signin_tab(None)
+
+    def _refresh_signin_tab(self, login):
+        """Show the CTA when signed out, the account banner when signed in."""
+        if not hasattr(self, "_signin_prompt"):
+            return  # header called _set_connected before the tab was built
+        if login:
+            self._signin_prompt.pack_forget()
+            self._signin_banner_lbl.configure(text=f"Signed in as {login}")
+            self._signin_banner.pack(fill="x", pady=(0, 4))
+        else:
+            self._signin_banner.pack_forget()
+            self._signin_prompt.pack(fill="x", pady=(0, 4))
+
+    def _build_manual_token_tab(self, parent, bg):
+        """Manual entry: paste a token from the iNaturalist token page."""
+        self._field_label(parent, "API token", bg)
+        tok_row = tk.Frame(parent, bg=bg)
+        tok_row.pack(fill="x")
+        tok_field = tk.Frame(tok_row, bg=COL["subtle"], highlightthickness=1,
+                             highlightbackground=COL["card_border"])
+        tok_field.pack(side="left", fill="x", expand=True)
+        self._token_var = tk.StringVar()
+        tk.Entry(tok_field, textvariable=self._token_var, show="•", bd=0,
+                 relief="flat", bg=COL["subtle"], fg=COL["text"],
+                 font=F["mono"], insertbackground=COL["text"]).pack(
+            side="left", fill="x", expand=True, padx=(10, 6), pady=8)
+        self._token_status = tk.Label(tok_field, text="", bg=COL["subtle"],
+                                      fg=COL["green"], font=F["help"])
+        self._token_status.pack(side="left", padx=(0, 10))
+        tok_link = tk.Label(
+            tok_row, text="Get a token ↗", bg=bg, fg=COL["primary"],
+            cursor="hand2", font=(F["btn_sm"][0], F["btn_sm"][1],
+                                  "bold underline"))
+        tok_link.pack(side="left", padx=(12, 4))
+        tok_link.bind("<Button-1>",
+                      lambda _e: webbrowser.open(f"{WEB}/users/api_token"))
+
+        tk.Label(parent,
+                 text="Sign in to iNaturalist, then copy your token from the "
+                      "token page. Tokens expire after about 24 hours.",
+                 bg=bg, fg=COL["muted"], font=F["help"], justify="left",
+                 wraplength=360).pack(anchor="w", pady=(7, 0))
 
     def _build_matching_card(self, c):
         bg = COL["card_bg"]
@@ -1994,6 +2358,119 @@ class VoucherSyncApp(tk.Tk):
             self._token_var.set(t)
             self._log_write("Token loaded from INAT_API_TOKEN environment variable.")
 
+    # ----- browser sign-in (OAuth) ----------------------------------------- #
+    def _oauth_sign_in(self):
+        """Run the browser sign-in flow off the UI thread and feed the
+        resulting token back through the message queue."""
+        if getattr(self, "_signin_busy", False):
+            return
+        if not oauth_configured():
+            messagebox.showinfo(
+                "Browser sign-in not set up",
+                "This build doesn't have an iNaturalist Client ID yet, so "
+                "browser sign-in is unavailable.\n\nUse the token page and "
+                "paste your token into the API token field instead.")
+            return
+
+        self._signin_busy = True
+        self._btn_signin.configure(text="Signing in…")
+        self._btn_signin.set_enabled(False)
+        self._log_write("Starting iNaturalist browser sign-in…")
+
+        def work():
+            try:
+                token, creds = oauth_login(
+                    log=lambda m: self._mq.put({"kind": "log", "text": m}))
+                # Confirm the token works and resolve the login name to show.
+                login = INatClient(token=token).verify_token()
+                self._mq.put({"kind": "oauth_ok", "token": token,
+                              "creds": creds, "login": login})
+            except OAuthError as exc:
+                self._mq.put({"kind": "oauth_err", "text": str(exc)})
+            except Exception as exc:  # network, JSON, anything unexpected
+                self._mq.put({"kind": "oauth_err",
+                              "text": f"Sign-in failed: {exc}"})
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _try_silent_refresh(self):
+        """On launch, if we have saved OAuth creds and no token already set,
+        mint a fresh JWT in the background — no prompt.  Falls back quietly to
+        the Sign-in button if the saved session is gone."""
+        if self._token_var.get().strip():
+            return  # an env var or pasted token already takes precedence
+        creds = load_credentials()
+        if not creds:
+            return
+        self._log_write("Restoring your saved iNaturalist session…")
+
+        def work():
+            try:
+                token = self._mint_from_creds(creds)
+                login = INatClient(token=token).verify_token()
+                if not login:
+                    raise OAuthError("saved session is no longer valid")
+                self._mq.put({"kind": "oauth_ok", "token": token,
+                              "creds": creds, "login": login})
+            except Exception as exc:
+                self._mq.put({"kind": "oauth_refresh_failed",
+                              "text": str(exc)})
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _mint_from_creds(self, creds):
+        """Get a JWT from saved creds, refreshing the access token if needed.
+        Mutates `creds` in place when a refresh yields a new access token so
+        the caller can re-persist it."""
+        try:
+            return fetch_api_token(creds["access_token"])
+        except OAuthError:
+            if not creds.get("refresh_token"):
+                raise
+            new = refresh_access_token(creds["refresh_token"])
+            creds.update(new)
+            return fetch_api_token(creds["access_token"])
+
+    def _signin_reset(self):
+        self._signin_busy = False
+        self._btn_signin.configure(text="Sign in with iNaturalist")
+        self._btn_signin.set_enabled(True)
+
+    def _on_oauth_ok(self, msg):
+        self._signin_reset()
+        self._token_var.set(msg["token"])
+        creds = msg.get("creds")
+        if creds:
+            save_credentials(creds)   # remember for silent refresh next launch
+        login = msg.get("login")
+        if login:
+            # The sync targets your own observations, so fill in the username.
+            self._user_var.set(login)
+            self._set_connected(login)
+            self._log_write(f"Signed in as {login}; API token loaded.")
+        else:
+            # Token minted but verification came back empty — keep it, but
+            # don't claim a connection we couldn't confirm.
+            self._log_write("Signed in; API token loaded.")
+
+    def _on_oauth_err(self, text):
+        self._signin_reset()
+        self._log_write(f"Sign-in failed: {text}")
+        messagebox.showerror("Sign-in failed", text)
+
+    def _on_refresh_failed(self, text):
+        # Startup refresh only: stay quiet (no dialog), drop the stale creds,
+        # and leave the Sign-in button for the user.
+        clear_credentials()
+        self._log_write(
+            f"Saved session expired — please sign in again. ({text})")
+
+    def _sign_out(self):
+        clear_credentials()
+        self._token_var.set("")
+        self._set_connected(None)   # clears the inline status and shows the CTA
+        self._log_write("Signed out; saved session forgotten.")
+
     def _get_dates(self):
         def to_api(s):
             """Convert DD/MM/YYYY user input to YYYY-MM-DD for the iNat API."""
@@ -2185,6 +2662,12 @@ class VoucherSyncApp(tk.Tk):
                     self._log_write(msg["text"])
                 elif kind == "connected":
                     self._set_connected(msg["login"])
+                elif kind == "oauth_ok":
+                    self._on_oauth_ok(msg)
+                elif kind == "oauth_err":
+                    self._on_oauth_err(msg["text"])
+                elif kind == "oauth_refresh_failed":
+                    self._on_refresh_failed(msg["text"])
                 elif kind == "field_results":
                     self._on_field_results(msg)
                 elif kind == "progress":
