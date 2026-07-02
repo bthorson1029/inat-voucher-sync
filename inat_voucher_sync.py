@@ -1728,12 +1728,9 @@ class VoucherSyncApp(tk.Tk):
         self._conn_dot.delete("all")
         self._conn_dot.create_oval(1, 1, 9, 9, fill=dot, outline="")
         self._conn_lbl.configure(bg=bg, fg=fg, text=text)
-        # Sign out only makes sense while connected.
-        if hasattr(self, "_signout_link"):
-            if login:
-                self._signout_link.pack(anchor="w", pady=(0, 12))
-            else:
-                self._signout_link.pack_forget()
+        # Swap the Sign-in tab between its call-to-action and the signed-in
+        # banner (which also carries the Sign out link).
+        self._refresh_signin_tab(login)
 
     # ----- small shared builders ------------------------------------------- #
     def _make_card(self, parent, bg=None):
@@ -1879,29 +1876,58 @@ class VoucherSyncApp(tk.Tk):
             self._tab_manual.pack(fill="x")
 
     def _build_signin_tab(self, parent, bg):
-        """Browser sign-in: one button mints the token, no copying."""
+        """Browser sign-in.  Two states, swapped by _refresh_signin_tab:
+        the big call-to-action when signed out, and a signed-in banner naming
+        the account (with a Sign out link) once connected."""
+        # ---- Signed-out: the primary call to action -----------------------
+        self._signin_prompt = tk.Frame(parent, bg=bg)
         self._btn_signin = FlatButton(
-            parent, text="Sign in with iNaturalist",
+            self._signin_prompt, text="Sign in with iNaturalist",
             command=self._oauth_sign_in,
             fg="#ffffff", bg=COL["primary"], active=COL["primary_press"],
             disabled_fg="#ffffff", disabled_bg=COL["muted2"],
             font=F["btn"], padx=22)
         self._btn_signin.pack(fill="x", pady=(0, 4))
-        tk.Label(parent,
+        tk.Label(self._signin_prompt,
                  text="Opens your browser to authorize — no token to copy. "
                       "You stay signed in, so it's usually one click, and the "
                       "app remembers you for next time.",
                  bg=bg, fg=COL["muted"], font=F["help"], justify="left",
-                 wraplength=360).pack(anchor="w", pady=(0, 12))
-        # Sign out — clears the saved session so the next launch won't restore
-        # it.  Only shown while connected (toggled by _set_connected); the empty
-        # holder keeps its slot so the link appears in place, not at the bottom.
-        self._signout_holder = tk.Frame(parent, bg=bg)
-        self._signout_holder.pack(anchor="w", fill="x")
-        self._signout_link = tk.Label(
-            self._signout_holder, text="Sign out", bg=bg, fg=COL["text_soft2"],
+                 wraplength=360).pack(anchor="w", pady=(0, 4))
+
+        # ---- Signed-in: a green banner naming the account, plus Sign out ----
+        self._signin_banner = tk.Frame(parent, bg=bg)
+        card = tk.Frame(self._signin_banner, bg=COL["green_bg"],
+                        highlightthickness=1,
+                        highlightbackground=COL["green_border"])
+        card.pack(fill="x")
+        row = tk.Frame(card, bg=COL["green_bg"])
+        row.pack(fill="x", padx=12, pady=10)
+        tk.Label(row, text="✓", bg=COL["green_bg"], fg=COL["green"],
+                 font=F["btn"]).pack(side="left", padx=(0, 9))
+        self._signin_banner_lbl = tk.Label(
+            row, text="", bg=COL["green_bg"], fg=COL["green_text"],
+            font=F["label"], justify="left", anchor="w")
+        self._signin_banner_lbl.pack(side="left")
+        signout = tk.Label(
+            self._signin_banner, text="Sign out", bg=bg, fg=COL["text_soft2"],
             cursor="hand2", font=(F["help"][0], F["help"][1], "underline"))
-        self._signout_link.bind("<Button-1>", lambda _e: self._sign_out())
+        signout.pack(anchor="w", pady=(6, 4))
+        signout.bind("<Button-1>", lambda _e: self._sign_out())
+
+        self._refresh_signin_tab(None)
+
+    def _refresh_signin_tab(self, login):
+        """Show the CTA when signed out, the account banner when signed in."""
+        if not hasattr(self, "_signin_prompt"):
+            return  # header called _set_connected before the tab was built
+        if login:
+            self._signin_prompt.pack_forget()
+            self._signin_banner_lbl.configure(text=f"Signed in as {login}")
+            self._signin_banner.pack(fill="x", pady=(0, 4))
+        else:
+            self._signin_banner.pack_forget()
+            self._signin_prompt.pack(fill="x", pady=(0, 4))
 
     def _build_manual_token_tab(self, parent, bg):
         """Manual entry: paste a token from the iNaturalist token page."""
@@ -2430,6 +2456,8 @@ class VoucherSyncApp(tk.Tk):
             save_credentials(creds)   # remember for silent refresh next launch
         login = msg.get("login")
         if login:
+            # The sync targets your own observations, so fill in the username.
+            self._user_var.set(login)
             self._set_connected(login)
             self._log_write(f"Signed in as {login}; API token loaded.")
         else:
